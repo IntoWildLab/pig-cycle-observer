@@ -1,14 +1,18 @@
 # 仅用于周末或节假日测试，不得用于正式定时任务
 
-$project = "D:\daily_stock_analysis-main"
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $proxy = "http://127.0.0.1:7897"
-$python = "C:\Users\11941\venvs\daily_stock_analysis\Scripts\python.exe"
+$PythonPath = $env:DAILY_STOCK_PYTHON
+if ([string]::IsNullOrWhiteSpace($PythonPath)) {
+    $PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+}
+$MainScript = Join-Path $ProjectRoot "main.py"
 $stocks = "002714,300498,000876,605296,159867"
-$logDirectory = Join-Path $project "logs"
+$logDirectory = Join-Path $ProjectRoot "logs"
 $startedAt = Get-Date
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-Set-Location $project
+Set-Location $ProjectRoot
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 Get-ChildItem -LiteralPath $logDirectory -Filter "*.log" -File -ErrorAction SilentlyContinue |
@@ -66,7 +70,7 @@ if (-not $proxyReady) {
     exit $proxyFailureExitCode
 }
 
-& $python main.py `
+& $PythonPath $MainScript `
     --stocks $stocks `
     --no-market-review `
     --force-run `

@@ -1,29 +1,22 @@
 <div align="center">
 
-# 📈 股票智能分析系统
+# 🐷 猪周期观察
 
-[![GitHub stars](https://img.shields.io/github/stars/ZhuLinsen/daily_stock_analysis?style=social)](https://github.com/ZhuLinsen/daily_stock_analysis/stargazers)
-[![CI](https://github.com/ZhuLinsen/daily_stock_analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/ZhuLinsen/daily_stock_analysis/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/IntoWildLab/pig-cycle-observer?style=social)](https://github.com/IntoWildLab/pig-cycle-observer/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-Ready-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/zhulinsen/daily_stock_analysis)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 
-<p align="center">
-  <img src="https://trendshift.io/api/badge/trendshift/repositories/18527/daily?language=Python" alt="#1 Python Repository Of The Day | Trendshift" width="250" height="55"/>&nbsp;<a href="https://hellogithub.com/repository/ZhuLinsen/daily_stock_analysis" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=6daa16e405ce46ed97b4a57706aeb29f&claim_uid=pfiJMqhR9uvDGlT&theme=neutral" alt="Featured｜HelloGitHub" width="230" /></a>
-</p>
+> 面向个人学习的猪周期标的分析与报告推送项目。
 
-> 🤖 基于 AI 大模型的 A股/港股/美股/日股/韩股/台股自选股智能分析系统，每日自动分析并推送「决策仪表盘」到企业微信/飞书/Telegram/Discord/Slack/邮箱
-
-[**产品预览**](#-产品预览) · [**功能特性**](#-功能特性) · [**快速开始**](#-快速开始) · [**推送效果**](#-推送效果) · [**文档中心**](docs/INDEX.md) · [**完整指南**](docs/full-guide.md)
-
-简体中文 | [English](docs/README_EN.md) | [繁體中文](docs/README_CHT.md)
+[**项目说明**](#项目来源) · [**观察标的**](#当前观察标的) · [**快速开始**](#-快速开始) · [**安全说明**](#安全说明)
 
 </div>
 
 ## 项目来源
 
 本项目基于 [ZhuLinsen/daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis) 进行个人化配置与功能调整。原项目采用 MIT License；本仓库保留原作者版权声明及 [LICENSE](LICENSE) 文件。
+
+本仓库是个人维护的衍生版本，与上游作者不存在官方合作、授权背书或隶属关系。上游项目的问题与本仓库的问题请分别在各自仓库反馈。
 
 ## 本版本用途
 
@@ -60,21 +53,6 @@
 - 公开仓库仅提供使用安全占位符的 `.env.example`。
 - GitHub Actions 如需使用密钥，应将密钥保存到 GitHub Secrets，不得写入代码、脚本或仓库配置文件。
 
-## 💖 赞助商 (Sponsors)
-<div align="center">
-  <p align="center">
-    <a href="https://open.anspire.cn/dsa?share_code=QFBC0FYC" target="_blank"><img src="./docs/assets/anspire.png" alt="Anspire Open 一站式模型和搜索服务" width="300" height="141" style="width: 300px; height: 141px; object-fit: contain;"></a>
-    <a href="https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis" target="_blank"><img src="./docs/assets/serpapi_banner_zh.png" alt="轻松抓取搜索引擎上的实时金融新闻数据 - SerpApi" width="300" height="141" style="width: 300px; height: 141px; object-fit: contain;"></a>
-  </p>
-</div>
-
-
-## 🖥️ 产品预览
-
-<p align="center">
-  <img src="docs/assets/readme_workspace_tour_20260510.gif" alt="DSA Web 工作台演示" width="720">
-</p>
-
 ## ✨ 功能特性
 
 | 能力 | 覆盖内容 |
@@ -84,138 +62,81 @@
 | Web / 桌面工作台 | 手动分析、任务进度、历史报告、完整 Markdown、回测、持仓、配置管理、浅色 / 深色主题 |
 | Agent 策略问股 | 多轮追问，支持均线、缠论、波浪、趋势、热点、事件、成长、预期等 15 种内置策略，覆盖 Web/Bot/API |
 | 智能导入与补全 | 图片、CSV/Excel、剪贴板导入；股票代码/名称/拼音/别名补全 |
-| 自动化与推送 | GitHub Actions、Docker、本地定时任务、FastAPI 服务和企业微信/飞书/Telegram/Discord/Slack/邮件推送 |
+| 自动化与推送 | 已验证 Windows 任务计划程序与 126 邮箱推送；GitHub Actions 云端运行尚未完成最终验证 |
 
 > 功能细节、字段契约、基本面 P0 超时语义、交易纪律、数据源优先级、Web/API 行为请看 [完整配置与部署指南](docs/full-guide.md)。
 
-### 技术栈与数据来源
+### 当前验证的主要组件
 
-| 类型 | 支持 |
+| 类型 | 当前配置 |
 |------|------|
-| AI 模型 | [Anspire](https://open.anspire.cn/dsa?share_code=QFBC0FYC)、[AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通义千问、Claude、Ollama 本地模型等 |
-| 行情数据 | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC)、AkShare、Tushare、Pytdx、Baostock、YFinance、Longbridge |
-| 新闻搜索 | [Anspire](https://open.anspire.cn/dsa/?share_code=QFBC0FYC)、[SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)、[Tavily](https://tavily.com/)、[Bocha](https://open.bocha.cn/)、[Brave](https://brave.com/search/api/)、[MiniMax](https://platform.minimaxi.com/)、SearXNG |
-| 社交舆情 | [Stock Sentiment API](https://api.adanos.org/docs)（Reddit / X / Polymarket，仅美股，可选） |
+| AI 分析 | DeepSeek（OpenAI 兼容接口） |
+| 新闻搜索 | Tavily |
+| 行情数据 | 项目内置的免费行情数据源及降级机制 |
+| 报告通知 | 126 邮箱 |
+| 本地自动化 | Windows PowerShell 脚本与任务计划程序 |
 
-> 项目默认内置 AkShare、Baostock、YFinance 等免费行情源，可零配置运行；免费源受上游限流、接口变动和网络波动影响，稳定性不保证。长期定时、批量分析或更稳定行情建议配置 TickFlow、Tushare、Longbridge 等 token 型数据源，适用市场、Actions 映射和 fallback 规则见 [数据源配置](docs/full-guide.md#数据源配置)。
+其他模型服务商及高级配置请参考[上游项目文档](https://github.com/ZhuLinsen/daily_stock_analysis)。
 
 ## 🚀 快速开始
 
-### 方式一：[GitHub Actions（推荐）](https://www.bilibili.com/video/BV11FEb66EXG/)
+### 1. 获取代码
 
-> 5 分钟完成部署，零成本，无需服务器。
-
-
-#### 1. Fork 本仓库
-
-点击右上角 `Fork` 按钮（顺便点个 Star⭐ 支持一下）
-
-#### 2. 配置 Secrets
-
-`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
-
-**AI 模型配置（至少配置一个）**
-
-默认先选一个模型服务商并填写 API Key；需要多模型、图片识别、本地模型或高级路由时，再参考 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md)。
-
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `ANSPIRE_API_KEYS` | [Anspire](https://open.anspire.cn/dsa?share_code=QFBC0FYC) API Key，一Key同时启用全球热门大模型和联网搜索，本项目新用户提供30元等额的免费额度（GLM5.2、GPT等模型特惠中） | **推荐** |
-| `AIHUBMIX_KEY` | [AIHubMix](https://aihubmix.com/?aff=CfMq) API Key，一Key切换使用全系模型，无需科学上网，本项目可享 10% 优惠 | **推荐** |
-| `GEMINI_API_KEY` | Google Gemini API Key | 可选 |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API Key | 可选 |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
-| `OPENAI_BASE_URL` / `OPENAI_MODEL` | 使用 OpenAI 兼容服务时填写 | 可选 |
-
-> Ollama 更适合本地 / Docker 部署，GitHub Actions 推荐使用云端 API。
-
-**通知渠道配置（至少配置一个）**
-
-| Secret 名称 | 说明 |
-|------------|------|
-| `WECHAT_WEBHOOK_URL` | 企业微信机器人 |
-| `FEISHU_WEBHOOK_URL` | 飞书机器人 |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Telegram |
-| `DISCORD_WEBHOOK_URL` | Discord Webhook |
-| `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID` | Slack Bot |
-| `EMAIL_SENDER` + `EMAIL_PASSWORD` | 邮件推送 |
-
-更多渠道、签名校验、分组邮件、Markdown 转图片等配置见 [通知渠道详细配置](docs/full-guide.md#通知渠道详细配置)。
-
-**自选股配置（必填）**
-
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `STOCK_LIST` | 自选股代码，如 `600519,hk00700,AAPL,7203.T,005930.KS,2330.TW` | ✅ |
-
-**新闻源配置（推荐）**
-
-新闻源会显著影响舆情、公告、事件和催化因素质量，建议至少配置一个搜索服务。
-
-| Secret 名称 | 说明 | 必填 |
-|------------|------|:----:|
-| `ANSPIRE_API_KEYS` | [Anspire AI Search](https://open.anspire.cn/dsa?share_code=QFBC0FYC)：汇聚全球舆情信息，适配A股、美股、港股等新闻和舆情检索；同一Key可复用大模型服务，本项目新用户提供免费30元等额的免费点数 | **推荐** |
-| `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)：搜索引擎结果补强，适合实时金融新闻 | **推荐** |
-| `TAVILY_API_KEYS` | [Tavily](https://tavily.com/)：通用新闻搜索 API | 可选 |
-| `BOCHA_API_KEYS` | [博查搜索](https://open.bocha.cn/)：中文搜索优化，支持 AI 摘要 | 可选 |
-| `BRAVE_API_KEYS` | [Brave Search](https://brave.com/search/api/)：隐私优先，美股资讯补强 | 可选 |
-| `MINIMAX_API_KEYS` | [MiniMax](https://platform.minimaxi.com/)：结构化搜索结果 | 可选 |
-| `SEARXNG_BASE_URLS` | SearXNG 自建实例：无配额兜底，适合私有部署 | 可选 |
-
-更多搜索源、社交舆情和降级规则见 [搜索服务配置](docs/full-guide.md#搜索服务配置)。
-
-**行情数据源配置（可选）**
-
-> 默认使用 AkShare、Baostock、YFinance 等免费数据源，日志中"未配置"的提示不影响运行。
-> 如需更稳定的行情，可按市场配置以下 Secret：
-
-| Secret 名称 | 适用市场 | 说明 |
-|------------|:--------:|------|
-| `TUSHARE_TOKEN` | A 股 | 提升历史行情稳定性 |
-| `LONGBRIDGE_OAUTH_CLIENT_ID` + `LONGBRIDGE_OAUTH_TOKEN_CACHE_B64` | 港股/美股 | 补齐量比、换手率、PE 等字段 |
-
-> 详见 [数据源配置](docs/full-guide.md#数据源配置)。
-
-#### 3. 启用 Actions
-
-`Actions` 标签 → `I understand my workflows, go ahead and enable them`
-
-#### 4. 手动测试
-
-`Actions` → `每日股票分析` → `Run workflow` → `Run workflow`
-
-#### 完成
-
-默认每个**工作日 18:00（北京时间）**自动执行，也可手动触发。默认非交易日（含 A/H/US 节假日）不执行；强制运行、交易日检查、断点续传等规则见 [完整指南](docs/full-guide.md#定时任务配置)。
-
-### 方式二：[客户端配置教程](https://www.bilibili.com/video/BV11FEb66Eyr/) / 本地运行 / Docker 部署
-
-```bash
-# 克隆项目
-git clone https://github.com/ZhuLinsen/daily_stock_analysis.git && cd daily_stock_analysis
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置环境变量
-cp .env.example .env && vim .env
-
-# 运行分析
-python main.py
+```powershell
+git clone https://github.com/IntoWildLab/pig-cycle-observer.git
+Set-Location pig-cycle-observer
 ```
 
-常用命令：
+### 2. 准备 Python 环境
 
-```bash
-python main.py --debug
-python main.py --dry-run
-python main.py --stocks 600519,hk00700,AAPL,2330.TW
-python main.py --market-review
-python main.py --schedule
-python main.py --serve-only
+建议使用 Python 3.11，并为项目创建独立虚拟环境，避免影响系统中的其他 Python 项目。
+
+```powershell
+py -3.11 -m venv .venv
+& ".\.venv\Scripts\python.exe" --version
 ```
 
-> Docker 部署、定时任务、云服务器访问请参考 [完整指南](docs/full-guide.md)；桌面客户端打包请参考 [桌面端打包说明](docs/desktop-package.md)。
+### 3. 安装依赖
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+```
+
+### 4. 配置环境变量
+
+将 `.env.example` 复制为 `.env`，然后只在本地填写真实配置。真实密钥不得写入 README、脚本或提交到 Git。
+
+```powershell
+Copy-Item .env.example .env
+```
+
+当前已验证的主要配置包括：
+
+- DeepSeek：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GENERATION_BACKEND`
+- Tavily：`TAVILY_API_KEYS`
+- 126 邮箱：`EMAIL_SENDER`、`EMAIL_PASSWORD`、`EMAIL_RECEIVERS`、`EMAIL_SENDER_NAME`
+- 观察标的：`STOCK_LIST`
+
+其他模型服务商及高级配置请参考[上游项目文档](https://github.com/ZhuLinsen/daily_stock_analysis)。
+
+### 5. 本地运行
+
+- `scripts/run_daily.ps1`：正式交易日运行，允许发送邮件，不包含 `--force-run`。
+- `scripts/run_weekend_test.ps1`：仅用于周末或节假日测试，包含 `--force-run` 和 `--no-notify`。
+
+在项目根目录按用途选择脚本：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\run_daily.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\run_weekend_test.ps1"
+```
+
+脚本默认使用项目内的 `.venv\Scripts\python.exe`。如需使用项目外虚拟环境，可在当前 PowerShell 进程中设置 `DAILY_STOCK_PYTHON`。Clash 代理默认地址为 `127.0.0.1:7897`，可按本机代理配置调整脚本中的地址和端口。
+
+### 6. 自动运行状态
+
+- Windows 任务计划程序已在本地完成配置验证，可调用 `scripts/run_daily.ps1`。
+- GitHub Actions 云端运行尚未完成最终验证，本仓库目前不将其标记为已部署或可直接使用。
 
 ## 📱 推送效果
 
@@ -292,44 +213,11 @@ python main.py --webui-only
 
 > Agent 具体参数、`skill` 命名兼容、多 Agent 模式和预算护栏见 [完整指南](docs/full-guide.md#本地-webui-管理界面) 与 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md)。
 
-## 🧩 相关项目 (Related Projects)
-
-> DSA 聚焦日常分析报告；下面两个同系列项目分别覆盖选股、策略验证与策略进化，适合按需延伸使用。它们当前独立维护，后续会优先探索与 DSA 的候选股导入、回测验证和报告联动。
-
-| 项目 | 定位 |
-|------|------|
-| [AlphaSift](https://github.com/ZhuLinsen/alphasift) | 多因子选股与全市场扫描，用于从股票池中提取候选标的 |
-| [AlphaEvo](https://github.com/ZhuLinsen/alphaevo) | 策略回测与自我进化，用于验证策略规则，并通过迭代探索策略参数与组合 |
-
-## 📬 联系与合作
-
-<table>
-  <tr>
-    <td width="92" valign="top"><strong>项目联系</strong></td>
-    <td valign="top">
-      <a href="https://github.com/ZhuLinsen/daily_stock_analysis/issues">GitHub Issues</a><br>
-      原项目咨询、问题反馈与功能建议
-    </td>
-    <td align="center" rowspan="3" valign="middle" width="148">
-      <a href="http://xhslink.com/m/tU520DWCKT" target="_blank"><img src="./docs/assets/xiaohongshu_tick.jpg" width="112" alt="小红书二维码"></a><br>
-      <sub>扫码关注小红书</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="92" valign="top"><strong>小红书</strong></td>
-    <td valign="top"><a href="http://xhslink.com/m/tU520DWCKT">欢迎关注小红书</a></td>
-  </tr>
-  <tr>
-    <td width="92" valign="top"><strong>问题反馈</strong></td>
-    <td valign="top"><a href="https://github.com/ZhuLinsen/daily_stock_analysis/issues">提交 Issue</a></td>
-  </tr>
-</table>
-
 ## 📄 License
 
 [MIT License](LICENSE) © 2026 ZhuLinsen
 
-欢迎在二次开发或引用时注明本仓库来源，感谢支持项目持续维护。
+本仓库保留上游项目的 MIT License 与原作者版权声明。使用、修改和分发时请遵守 [LICENSE](LICENSE)。
 
 ## ⚠️ 免责声明
 
