@@ -21,6 +21,45 @@
 
 </div>
 
+## 项目来源
+
+本项目基于 [ZhuLinsen/daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis) 进行个人化配置与功能调整。原项目采用 MIT License；本仓库保留原作者版权声明及 [LICENSE](LICENSE) 文件。
+
+## 本版本用途
+
+本版本用于个人“猪周期观察”学习项目，主要用于整理公开行情、新闻和模型分析结果。所有内容仅供信息整理和技术学习，不构成任何投资建议。
+
+### 当前观察标的
+
+| 股票代码 | 名称 |
+| --- | --- |
+| `002714` | 牧原股份 |
+| `300498` | 温氏股份 |
+| `000876` | 新希望 |
+| `605296` | 神农集团 |
+| `159867` | 鹏华中证畜牧养殖ETF |
+
+### 本版本主要调整
+
+- 接入 DeepSeek，并增加空响应检测和仅针对当前标的的单次重试。
+- 使用 Tavily 搜索相关新闻。
+- 支持通过 126 邮箱推送分析报告。
+- 增加 Windows 正式运行脚本 `scripts/run_daily.ps1`。
+- 增加仅用于周末或节假日测试的脚本 `scripts/run_weekend_test.ps1`。
+- 为运行脚本增加日志记录、旧日志清理和 Clash 代理就绪等待。
+- 支持通过 Windows 任务计划程序调用正式运行脚本；计划任务应只调用 `run_daily.ps1`。
+
+### 正式运行与周末测试
+
+- `run_daily.ps1`：用于正式交易日运行，允许发送邮件，不包含 `--force-run`。
+- `run_weekend_test.ps1`：仅用于周末或节假日测试，包含 `--force-run` 和 `--no-notify`，不会发送测试邮件。
+
+### 安全说明
+
+- 真实配置只应写入本地 `.env`，不得提交或上传该文件。
+- 公开仓库仅提供使用安全占位符的 `.env.example`。
+- GitHub Actions 如需使用密钥，应将密钥保存到 GitHub Secrets，不得写入代码、脚本或仓库配置文件。
+
 ## 💖 赞助商 (Sponsors)
 <div align="center">
   <p align="center">
@@ -266,10 +305,10 @@ python main.py --webui-only
 
 <table>
   <tr>
-    <td width="92" valign="top"><strong>合作邮箱</strong></td>
+    <td width="92" valign="top"><strong>项目联系</strong></td>
     <td valign="top">
-      <a href="mailto:zhuls345@gmail.com">zhuls345@gmail.com</a><br>
-      项目咨询、部署支持与功能扩展
+      <a href="https://github.com/ZhuLinsen/daily_stock_analysis/issues">GitHub Issues</a><br>
+      原项目咨询、问题反馈与功能建议
     </td>
     <td align="center" rowspan="3" valign="middle" width="148">
       <a href="http://xhslink.com/m/tU520DWCKT" target="_blank"><img src="./docs/assets/xiaohongshu_tick.jpg" width="112" alt="小红书二维码"></a><br>
