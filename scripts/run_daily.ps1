@@ -21,6 +21,15 @@ function Write-RunLog {
     $Message | Tee-Object -FilePath $logPath -Append
 }
 
+$proxyHost = "127.0.0.1"
+$proxyPort = 7897
+$proxyCheckIntervalSeconds = 15
+$proxyMaxWaitSeconds = 600
+$proxyFailureExitCode = 2
+$proxyReadyMessage = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("Q2xhc2gg5Luj55CG5bey5bCx57uq"))
+$proxyWaitingMessage = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("5q2j5Zyo562J5b6FIENsYXNoIOS7o+eQhuerr+WPoyA3ODk3IOWwsee7qg=="))
+$proxyTimeoutMessage = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("Q2xhc2gg5Luj55CG56uv5Y+jIDc4OTcg5pyq5bCx57uq77yM5pys5qyh5Y+W5raI6L+Q6KGM"))
+
 $env:HTTP_PROXY = $proxy
 $env:HTTPS_PROXY = $proxy
 $env:ALL_PROXY = $proxy
@@ -30,6 +39,30 @@ $env:all_proxy = $proxy
 
 Write-RunLog ("Script start time: {0}" -f $startedAt.ToString("yyyy-MM-dd HH:mm:ss"))
 Write-RunLog "Run type: daily"
+
+$proxyReady = $false
+$waitedSeconds = 0
+while ($waitedSeconds -lt $proxyMaxWaitSeconds) {
+    if (Test-NetConnection $proxyHost -Port $proxyPort -InformationLevel Quiet) {
+        $proxyReady = $true
+        Write-RunLog $proxyReadyMessage
+        break
+    }
+
+    Write-RunLog ("{0} (elapsed: {1}/{2} seconds)" -f $proxyWaitingMessage, $waitedSeconds, $proxyMaxWaitSeconds)
+    Start-Sleep -Seconds $proxyCheckIntervalSeconds
+    $waitedSeconds += $proxyCheckIntervalSeconds
+}
+
+if (-not $proxyReady) {
+    Write-RunLog $proxyTimeoutMessage
+    Write-RunLog ("Script exit code: {0}" -f $proxyFailureExitCode)
+    $stopwatch.Stop()
+    $endedAt = Get-Date
+    Write-RunLog ("Script end time: {0}" -f $endedAt.ToString("yyyy-MM-dd HH:mm:ss"))
+    Write-RunLog ("Total duration: {0:N2} seconds" -f $stopwatch.Elapsed.TotalSeconds)
+    exit $proxyFailureExitCode
+}
 
 & $python main.py `
     --stocks $stocks `
