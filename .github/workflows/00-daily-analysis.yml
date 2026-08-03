@@ -2,7 +2,7 @@ name: 猪周期观察-云端每日分析
 
 on:
   schedule:
-    - cron: '0 10 * * 1-5'
+    - cron: '20 14 * * 1-5'
   workflow_dispatch:
     inputs:
       force_run:
