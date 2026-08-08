@@ -898,6 +898,15 @@ class StockAnalysisPipeline:
         """
         enhanced = context.copy()
         enhanced["report_language"] = normalize_report_language(getattr(self.config, "report_language", "zh"))
+
+        # Keep the completed daily-bar date separate from any realtime
+        # observation date. A natural run date is not necessarily a trading day.
+        original_today = context.get("today")
+        trading_date = None
+        if isinstance(original_today, dict) and original_today:
+            trading_date = original_today.get("date")
+        if trading_date:
+            enhanced["trading_date"] = str(trading_date)
         
         # 添加股票名称
         if stock_name:
@@ -1001,6 +1010,7 @@ class StockAnalysisPipeline:
                     'ma10': trend_result.ma10,
                     'ma20': trend_result.ma20,
                     'date': market_today,
+                    'observation_date': market_today,
                     'data_source': f"realtime:{source_name}",
                     'realtime_source': source_name,
                     'is_estimated': True,
@@ -1043,7 +1053,7 @@ class StockAnalysisPipeline:
                 enhanced['ma_status'] = self._compute_ma_status(
                     price, trend_result.ma5, trend_result.ma10, trend_result.ma20
                 )
-                enhanced['date'] = market_today
+                enhanced['observation_date'] = market_today
                 if yesterday_close is not None:
                     try:
                         yc = float(yesterday_close)

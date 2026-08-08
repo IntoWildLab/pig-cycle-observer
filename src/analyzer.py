@@ -4365,8 +4365,9 @@ class GeminiAnalyzer:
             except (TypeError, ValueError):
                 change_amount = None
 
+        trading_date = str(context.get('trading_date') or '').strip()
+        observation_date = str(context.get('observation_date') or '').strip()
         snapshot = {
-            "date": context.get('date', '未知'),
             "close": self._format_price(close),
             "open": self._format_price(today.get('open')),
             "high": self._format_price(high),
@@ -4378,6 +4379,13 @@ class GeminiAnalyzer:
             "volume": self._format_volume(today.get('volume')),
             "amount": self._format_amount(today.get('amount')),
         }
+        if trading_date:
+            # ``date`` is the public report field for the verified completed
+            # daily-bar date; an observation date must never replace it.
+            snapshot["date"] = trading_date
+            snapshot["trading_date"] = trading_date
+        if observation_date:
+            snapshot["observation_date"] = observation_date
 
         if realtime:
             snapshot.update({

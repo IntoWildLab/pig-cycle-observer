@@ -16,7 +16,7 @@ from src.services.run_summary import (
 
 
 def _result(code: str, data_date: str):
-    return SimpleNamespace(code=code, market_snapshot={"date": data_date})
+    return SimpleNamespace(code=code, market_snapshot={"trading_date": data_date})
 
 
 class RunSummaryTests(unittest.TestCase):

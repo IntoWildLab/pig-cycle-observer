@@ -55,7 +55,8 @@ def collect_data_dates(results: Iterable[object]) -> tuple[str, ...]:
         snapshot = getattr(result, "market_snapshot", None)
         if not isinstance(snapshot, dict):
             continue
-        value = str(snapshot.get("date") or "").strip()
+        # Only an explicitly sourced completed daily-bar date is reliable here.
+        value = str(snapshot.get("trading_date") or "").strip()
         if value and value.lower() not in {"未知", "unknown", "n/a", "none"}:
             dates.append(value)
     return tuple(dict.fromkeys(dates))
