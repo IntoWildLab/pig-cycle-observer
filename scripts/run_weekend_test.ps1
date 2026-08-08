@@ -1,5 +1,10 @@
 # 仅用于周末或节假日测试，不得用于正式定时任务
 
+$Utf8Encoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $Utf8Encoding
+$OutputEncoding = $Utf8Encoding
+$env:PYTHONIOENCODING = "utf-8"
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $proxy = "http://127.0.0.1:7897"
 $PythonPath = $env:DAILY_STOCK_PYTHON
