@@ -17,6 +17,12 @@ from .sow_monthly import (
     parse_sow_monthly_record,
 )
 from .sow_official import SowOfficialFetchError, fetch_sow_record_from_official_url
+from .sow_discovery import (
+    MAX_CANDIDATES_PER_RUN,
+    MAX_REQUESTS_PER_RUN,
+    SowDiscoveryError,
+    discover_latest_sow_record,
+)
 
 __all__ = [
     "MoaWeeklyDataError",
@@ -33,4 +39,8 @@ __all__ = [
     "parse_sow_monthly_record",
     "SowOfficialFetchError",
     "fetch_sow_record_from_official_url",
+    "MAX_CANDIDATES_PER_RUN",
+    "MAX_REQUESTS_PER_RUN",
+    "SowDiscoveryError",
+    "discover_latest_sow_record",
 ]
