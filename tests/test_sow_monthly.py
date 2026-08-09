@@ -64,6 +64,41 @@ def test_explicit_year_month_wins_across_year_boundary() -> None:
     assert record.month == "2025-12"
 
 
+@pytest.mark.parametrize(
+    ("quarter", "expected_month"),
+    [
+        ("一", "2026-03"),
+        ("二", "2026-06"),
+        ("三", "2026-09"),
+        ("四", "2026-12"),
+    ],
+)
+def test_explicit_year_quarter_end_maps_to_month(quarter: str, expected_month: str) -> None:
+    record = _parse(
+        f"2026年{quarter}季度末全国能繁母猪存栏3780万头",
+        published=date(2027, 1, 10),
+    )
+
+    assert record.month == expected_month
+
+
+def test_quarter_without_year_uses_publish_year_when_quarter_has_ended() -> None:
+    record = _parse(
+        "二季度末全国能繁母猪存栏3780万头",
+        published=date(2026, 7, 16),
+    )
+
+    assert record.month == "2026-06"
+
+
+def test_quarter_without_year_does_not_guess_across_year_boundary() -> None:
+    with pytest.raises(SowMonthlyDataError, match="quarter year is ambiguous"):
+        _parse(
+            "四季度末全国能繁母猪存栏3780万头",
+            published=date(2027, 1, 10),
+        )
+
+
 @pytest.mark.parametrize("word", ["增长", "上升", "增加"])
 def test_positive_change_words(word: str) -> None:
     record = _parse(f"5月末能繁母猪存栏3996万头，环比{word}0.5%")

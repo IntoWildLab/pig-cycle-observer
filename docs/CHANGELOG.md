@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] 猪周期数据层新增官方白名单 URL 的单次保守读取，支持 HTML、CSV、Excel 与 PDF 文本解析，不自动翻页、重试或链接发现。
 - [修复] Windows PowerShell 本地启动脚本使用进程级 UTF-8 输出，避免中文与 emoji 日志触发 GBK 编码错误；公共 SearXNG 实例自动发现默认关闭。
 - [修复] 周末或非交易日使用 `--force-run` 时区分实际日线交易日期 `trading_date` 与实时行情观测日期 `observation_date`，邮件摘要仅显示真实交易日期。
 - [修复] 统一等价股票代码的本地日线候选与同源窗口解析；冲突沪深交易所代码不再降级匹配裸码，回测仅接受快照或交易日历确认的起点，并在同一起点中优先完整的单一代码窗口。

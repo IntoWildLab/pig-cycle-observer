@@ -16,6 +16,7 @@ from .sow_monthly import (
     capacity_zone,
     parse_sow_monthly_record,
 )
+from .sow_official import SowOfficialFetchError, fetch_sow_record_from_official_url
 
 __all__ = [
     "MoaWeeklyDataError",
@@ -30,4 +31,6 @@ __all__ = [
     "capacity_ratio",
     "capacity_zone",
     "parse_sow_monthly_record",
+    "SowOfficialFetchError",
+    "fetch_sow_record_from_official_url",
 ]

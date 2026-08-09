@@ -14,6 +14,7 @@ CAPACITY_RED_LOW_UPPER = 0.88
 CAPACITY_YELLOW_LOW_UPPER = 0.92
 CAPACITY_GREEN_UPPER = 1.03
 CAPACITY_YELLOW_HIGH_UPPER = 1.06
+_QUARTER_END_MONTHS = {"一": 3, "二": 6, "三": 9, "四": 12}
 
 
 class SowMonthlyDataError(ValueError):
@@ -77,21 +78,35 @@ def _parse_source_type(value: SowSourceType | str) -> SowSourceType:
 
 
 def _parse_month(text: str, publish_date: Optional[date]) -> str:
-    explicit_month = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*末", text)
-    if explicit_month:
-        year, month = (int(value) for value in explicit_month.groups())
+    explicit_quarter = re.search(r"(20\d{2})\s*年\s*([一二三四])\s*季度\s*末", text)
+    if explicit_quarter:
+        year = int(explicit_quarter.group(1))
+        month = _QUARTER_END_MONTHS[explicit_quarter.group(2)]
     else:
-        year_end = re.search(r"(20\d{2})\s*年\s*末", text)
-        if year_end:
-            year, month = int(year_end.group(1)), 12
+        explicit_month = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*末", text)
+        if explicit_month:
+            year, month = (int(value) for value in explicit_month.groups())
         else:
-            month_only = re.search(r"(?<!\d)(\d{1,2})\s*月\s*末", text)
-            if not month_only or publish_date is None:
-                raise SowMonthlyDataError(
-                    "Sow inventory month is ambiguous; provide an explicit year or publish_date"
-                )
-            month = int(month_only.group(1))
-            year = publish_date.year - 1 if month > publish_date.month else publish_date.year
+            year_end = re.search(r"(20\d{2})\s*年\s*末", text)
+            if year_end:
+                year, month = int(year_end.group(1)), 12
+            else:
+                quarter_only = re.search(r"([一二三四])\s*季度\s*末", text)
+                if quarter_only:
+                    month = _QUARTER_END_MONTHS[quarter_only.group(1)]
+                    if publish_date is None or month > publish_date.month:
+                        raise SowMonthlyDataError(
+                            "Sow inventory quarter year is ambiguous; provide an explicit year"
+                        )
+                    year = publish_date.year
+                else:
+                    month_only = re.search(r"(?<!\d)(\d{1,2})\s*月\s*末", text)
+                    if not month_only or publish_date is None:
+                        raise SowMonthlyDataError(
+                            "Sow inventory month is ambiguous; provide an explicit year or publish_date"
+                        )
+                    month = int(month_only.group(1))
+                    year = publish_date.year - 1 if month > publish_date.month else publish_date.year
 
     if not 1 <= month <= 12:
         raise SowMonthlyDataError(f"Invalid sow inventory month: {month}")
