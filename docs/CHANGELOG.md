@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] 农业农村部周度价格抓取区分有硬请求上限的历史回填与最多 2 次 GET 的日常增量模式，并禁止重定向与非官方候选。
 - [新功能] 猪周期官方数据新增单入口、最多 5 次请求与 2 篇候选的受控文章发现器，不自动翻页、并发或重试。
 - [新功能] 猪周期数据层新增官方白名单 URL 的单次保守读取，支持 HTML、CSV、Excel 与 PDF 文本解析，不自动翻页、重试或链接发现。
 - [修复] Windows PowerShell 本地启动脚本使用进程级 UTF-8 输出，避免中文与 emoji 日志触发 GBK 编码错误；公共 SearXNG 实例自动发现默认关闭。

@@ -4,6 +4,7 @@ from .moa_weekly import (
     MoaWeeklyDataError,
     MoaWeeklyRecord,
     export_weekly_records_csv,
+    fetch_latest_weekly_increment,
     fetch_recent_weekly_records,
     parse_weekly_record,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "MoaWeeklyDataError",
     "MoaWeeklyRecord",
     "export_weekly_records_csv",
+    "fetch_latest_weekly_increment",
     "fetch_recent_weekly_records",
     "parse_weekly_record",
     "NORMAL_CAPACITY_2026",
