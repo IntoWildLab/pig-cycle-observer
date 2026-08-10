@@ -1,0 +1,96 @@
+"""Local SQLite schema for the isolated pig-cycle data layer."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS moa_weekly_records (
+        collection_date TEXT PRIMARY KEY,
+        publish_date TEXT NOT NULL,
+        period_label TEXT NOT NULL,
+        piglet_price REAL NOT NULL,
+        live_hog_price REAL NOT NULL,
+        corn_price REAL NOT NULL,
+        soybean_meal_price REAL,
+        fattening_feed_price REAL,
+        derived_pig_corn_ratio REAL NOT NULL,
+        source_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sow_monthly_records (
+        month TEXT NOT NULL,
+        source_type TEXT NOT NULL CHECK (
+            source_type IN ('nbs', 'moa_reported', 'moa_estimate')
+        ),
+        sow_inventory REAL NOT NULL,
+        mom_change REAL,
+        yoy_change REAL,
+        publish_date TEXT,
+        source_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (month, source_type)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS processed_sources (
+        record_kind TEXT NOT NULL CHECK (
+            record_kind IN ('moa_weekly', 'sow_monthly')
+        ),
+        source_url TEXT NOT NULL,
+        business_key TEXT NOT NULL,
+        source_type TEXT CHECK (
+            source_type IS NULL
+            OR source_type IN ('nbs', 'moa_reported', 'moa_estimate')
+        ),
+        publish_date TEXT,
+        processed_at TEXT NOT NULL,
+        PRIMARY KEY (record_kind, source_url)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_moa_weekly_records_source_url
+    ON moa_weekly_records (source_url)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_sow_monthly_records_source_url
+    ON sow_monthly_records (source_url)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_processed_sources_record_kind
+    ON processed_sources (record_kind)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_processed_sources_business_key
+    ON processed_sources (record_kind, business_key)
+    """,
+)
+
+
+class PigCycleStorage:
+    """Own the local SQLite schema without coupling to the V1 database layer."""
+
+    def __init__(self, db_path: str | Path) -> None:
+        self.db_path = Path(db_path)
+
+    def initialize_schema(self) -> None:
+        """Create the first-version pig-cycle tables and indexes atomically."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute("BEGIN")
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
