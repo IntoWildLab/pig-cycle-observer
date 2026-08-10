@@ -3,7 +3,25 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+
+from .moa_weekly import MoaWeeklyRecord
+
+
+class MoaWeeklySaveStatus(str, Enum):
+    """Outcome of persisting one successfully parsed MOA weekly record."""
+
+    INSERTED = "inserted"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+    OLDER_IGNORED = "older_ignored"
+    CONFLICT = "conflict"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 _SCHEMA_STATEMENTS = (
@@ -94,3 +112,133 @@ class PigCycleStorage:
             raise
         finally:
             connection.close()
+
+    def save_moa_weekly(self, record: MoaWeeklyRecord) -> MoaWeeklySaveStatus:
+        """Persist one MOA weekly record and remember its source atomically."""
+        now = _utc_now()
+        collection_date = record.collection_date.isoformat()
+        publish_date = record.publish_date.isoformat()
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            processed = connection.execute(
+                """
+                SELECT business_key
+                FROM processed_sources
+                WHERE record_kind = 'moa_weekly' AND source_url = ?
+                """,
+                (record.source_url,),
+            ).fetchone()
+            if processed is not None and processed["business_key"] != collection_date:
+                raise ValueError(
+                    "MOA weekly source URL is already mapped to a different collection_date"
+                )
+            if processed is None:
+                connection.execute(
+                    """
+                    INSERT INTO processed_sources (
+                        record_kind, source_url, business_key, source_type,
+                        publish_date, processed_at
+                    ) VALUES ('moa_weekly', ?, ?, NULL, ?, ?)
+                    """,
+                    (record.source_url, collection_date, publish_date, now),
+                )
+
+            current = connection.execute(
+                """
+                SELECT *
+                FROM moa_weekly_records
+                WHERE collection_date = ?
+                """,
+                (collection_date,),
+            ).fetchone()
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO moa_weekly_records (
+                        collection_date, publish_date, period_label, piglet_price,
+                        live_hog_price, corn_price, soybean_meal_price,
+                        fattening_feed_price, derived_pig_corn_ratio, source_url,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        collection_date,
+                        publish_date,
+                        record.period_label,
+                        record.piglet_price,
+                        record.live_hog_price,
+                        record.corn_price,
+                        record.soybean_meal_price,
+                        record.fattening_feed_price,
+                        record.derived_pig_corn_ratio,
+                        record.source_url,
+                        now,
+                        now,
+                    ),
+                )
+                status = MoaWeeklySaveStatus.INSERTED
+            elif publish_date > current["publish_date"]:
+                connection.execute(
+                    """
+                    UPDATE moa_weekly_records
+                    SET publish_date = ?, period_label = ?, piglet_price = ?,
+                        live_hog_price = ?, corn_price = ?, soybean_meal_price = ?,
+                        fattening_feed_price = ?, derived_pig_corn_ratio = ?,
+                        source_url = ?, updated_at = ?
+                    WHERE collection_date = ?
+                    """,
+                    (
+                        publish_date,
+                        record.period_label,
+                        record.piglet_price,
+                        record.live_hog_price,
+                        record.corn_price,
+                        record.soybean_meal_price,
+                        record.fattening_feed_price,
+                        record.derived_pig_corn_ratio,
+                        record.source_url,
+                        now,
+                        collection_date,
+                    ),
+                )
+                status = MoaWeeklySaveStatus.UPDATED
+            elif publish_date < current["publish_date"]:
+                status = MoaWeeklySaveStatus.OLDER_IGNORED
+            elif self._moa_business_content(record) == self._stored_moa_business_content(current):
+                status = MoaWeeklySaveStatus.UNCHANGED
+            else:
+                status = MoaWeeklySaveStatus.CONFLICT
+
+            connection.commit()
+            return status
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _moa_business_content(record: MoaWeeklyRecord) -> tuple[object, ...]:
+        return (
+            record.period_label,
+            record.piglet_price,
+            record.live_hog_price,
+            record.corn_price,
+            record.soybean_meal_price,
+            record.fattening_feed_price,
+            record.derived_pig_corn_ratio,
+        )
+
+    @staticmethod
+    def _stored_moa_business_content(row: sqlite3.Row) -> tuple[object, ...]:
+        return (
+            row["period_label"],
+            row["piglet_price"],
+            row["live_hog_price"],
+            row["corn_price"],
+            row["soybean_meal_price"],
+            row["fattening_feed_price"],
+            row["derived_pig_corn_ratio"],
+        )

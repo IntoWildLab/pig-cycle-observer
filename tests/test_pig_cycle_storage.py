@@ -1,14 +1,54 @@
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 import src.pig_cycle.storage as storage_module
-from src.pig_cycle.storage import PigCycleStorage
+from src.pig_cycle.moa_weekly import MoaWeeklyRecord
+from src.pig_cycle.storage import MoaWeeklySaveStatus, PigCycleStorage
 
 
 TABLES = {"moa_weekly_records", "sow_monthly_records", "processed_sources"}
+
+
+def _weekly_record(
+    *,
+    collection_date: date = date(2026, 7, 30),
+    publish_date: date = date(2026, 8, 4),
+    source_url: str = "https://xmsyj.moa.gov.cn/jcyj/weekly-a.htm",
+    soybean_meal_price: float | None = 3.23,
+    fattening_feed_price: float | None = 3.36,
+) -> MoaWeeklyRecord:
+    return MoaWeeklyRecord(
+        collection_date=collection_date,
+        publish_date=publish_date,
+        period_label="7月第5周",
+        piglet_price=23.0,
+        live_hog_price=14.0,
+        corn_price=2.5,
+        soybean_meal_price=soybean_meal_price,
+        fattening_feed_price=fattening_feed_price,
+        derived_pig_corn_ratio=5.6,
+        source_url=source_url,
+    )
+
+
+def _fetch_one(db_path: Path, query: str, parameters: tuple[object, ...] = ()) -> sqlite3.Row:
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(query, parameters).fetchone()
+    assert row is not None
+    return row
+
+
+def _count(db_path: Path, table: str) -> int:
+    with closing(sqlite3.connect(db_path)) as connection:
+        row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _table_names(db_path: Path) -> set[str]:
@@ -200,3 +240,171 @@ def test_initialize_schema_is_idempotent_and_preserves_data(tmp_path: Path) -> N
             """
         ).fetchone()
     assert row == ("2026-07-30", "https://example/weekly")
+
+
+def test_save_moa_weekly_inserts_record_and_processed_source(initialized_db: Path) -> None:
+    record = _weekly_record()
+    storage = PigCycleStorage(initialized_db)
+
+    assert storage.save_moa_weekly(record) is MoaWeeklySaveStatus.INSERTED
+
+    stored = _fetch_one(
+        initialized_db,
+        "SELECT * FROM moa_weekly_records WHERE collection_date = ?",
+        (record.collection_date.isoformat(),),
+    )
+    processed = _fetch_one(
+        initialized_db,
+        "SELECT * FROM processed_sources WHERE record_kind = 'moa_weekly' AND source_url = ?",
+        (record.source_url,),
+    )
+    assert stored["publish_date"] == record.publish_date.isoformat()
+    assert stored["source_url"] == record.source_url
+    assert stored["created_at"] == stored["updated_at"]
+    assert processed["business_key"] == record.collection_date.isoformat()
+    assert processed["source_type"] is None
+    assert processed["publish_date"] == record.publish_date.isoformat()
+    assert processed["processed_at"] == stored["created_at"]
+
+
+def test_save_moa_weekly_identical_repeat_is_idempotent(initialized_db: Path) -> None:
+    record = _weekly_record()
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(record)
+    before = _fetch_one(initialized_db, "SELECT created_at, updated_at FROM moa_weekly_records")
+    processed_before = _fetch_one(initialized_db, "SELECT processed_at FROM processed_sources")
+
+    assert storage.save_moa_weekly(record) is MoaWeeklySaveStatus.UNCHANGED
+
+    after = _fetch_one(initialized_db, "SELECT created_at, updated_at FROM moa_weekly_records")
+    processed_after = _fetch_one(initialized_db, "SELECT processed_at FROM processed_sources")
+    assert tuple(after) == tuple(before)
+    assert tuple(processed_after) == tuple(processed_before)
+    assert _count(initialized_db, "processed_sources") == 1
+
+
+def test_save_moa_weekly_same_content_new_url_only_remembers_source(initialized_db: Path) -> None:
+    first = _weekly_record()
+    second = replace(first, source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-b.htm")
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+    before = _fetch_one(initialized_db, "SELECT source_url, updated_at FROM moa_weekly_records")
+
+    assert storage.save_moa_weekly(second) is MoaWeeklySaveStatus.UNCHANGED
+
+    after = _fetch_one(initialized_db, "SELECT source_url, updated_at FROM moa_weekly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_moa_weekly_newer_publication_updates_current_record(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = iter(("2026-08-04T01:00:00+00:00", "2026-08-05T01:00:00+00:00"))
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: next(times))
+    first = _weekly_record()
+    corrected = replace(
+        first,
+        publish_date=date(2026, 8, 5),
+        piglet_price=24.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-correction.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+
+    assert storage.save_moa_weekly(corrected) is MoaWeeklySaveStatus.UPDATED
+
+    stored = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_records")
+    assert stored["publish_date"] == "2026-08-05"
+    assert stored["piglet_price"] == 24.0
+    assert stored["source_url"] == corrected.source_url
+    assert stored["created_at"] == "2026-08-04T01:00:00+00:00"
+    assert stored["updated_at"] == "2026-08-05T01:00:00+00:00"
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_moa_weekly_older_publication_is_ignored_but_remembered(initialized_db: Path) -> None:
+    current = _weekly_record()
+    older = replace(
+        current,
+        publish_date=date(2026, 8, 3),
+        piglet_price=20.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-older.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(current)
+    before = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_records")
+
+    assert storage.save_moa_weekly(older) is MoaWeeklySaveStatus.OLDER_IGNORED
+
+    after = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_moa_weekly_same_publication_conflict_is_remembered(initialized_db: Path) -> None:
+    current = _weekly_record()
+    conflicting = replace(
+        current,
+        live_hog_price=15.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-conflict.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(current)
+    before = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_records")
+
+    assert storage.save_moa_weekly(conflicting) is MoaWeeklySaveStatus.CONFLICT
+
+    after = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_moa_weekly_rejects_source_remapped_to_another_date(initialized_db: Path) -> None:
+    first = _weekly_record()
+    remapped = replace(first, collection_date=date(2026, 8, 6))
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+
+    with pytest.raises(ValueError, match="different collection_date"):
+        storage.save_moa_weekly(remapped)
+
+    assert _count(initialized_db, "moa_weekly_records") == 1
+    assert _count(initialized_db, "processed_sources") == 1
+    processed = _fetch_one(initialized_db, "SELECT business_key FROM processed_sources")
+    assert processed["business_key"] == first.collection_date.isoformat()
+
+
+def test_save_moa_weekly_preserves_null_optional_prices(initialized_db: Path) -> None:
+    record = _weekly_record(soybean_meal_price=None, fattening_feed_price=None)
+
+    assert PigCycleStorage(initialized_db).save_moa_weekly(record) is MoaWeeklySaveStatus.INSERTED
+
+    stored = _fetch_one(
+        initialized_db,
+        "SELECT soybean_meal_price, fattening_feed_price FROM moa_weekly_records",
+    )
+    assert stored["soybean_meal_price"] is None
+    assert stored["fattening_feed_price"] is None
+
+
+def test_save_moa_weekly_rolls_back_processed_source_when_business_insert_fails(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_moa_weekly_insert
+            BEFORE INSERT ON moa_weekly_records
+            BEGIN
+                SELECT RAISE(ABORT, 'forced test failure');
+            END
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced test failure"):
+        PigCycleStorage(initialized_db).save_moa_weekly(_weekly_record())
+
+    assert _count(initialized_db, "moa_weekly_records") == 0
+    assert _count(initialized_db, "processed_sources") == 0
