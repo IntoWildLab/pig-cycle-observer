@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 
 from .moa_weekly import MoaWeeklyRecord
+from .sow_monthly import SowMonthlyRecord
 
 
 class MoaWeeklySaveStatus(str, Enum):
@@ -18,6 +19,17 @@ class MoaWeeklySaveStatus(str, Enum):
     UNCHANGED = "unchanged"
     OLDER_IGNORED = "older_ignored"
     CONFLICT = "conflict"
+
+
+class SowMonthlySaveStatus(str, Enum):
+    """Outcome of persisting one successfully parsed monthly sow record."""
+
+    INSERTED = "inserted"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+    OLDER_IGNORED = "older_ignored"
+    CONFLICT = "conflict"
+    ORDER_UNKNOWN = "order_unknown"
 
 
 def _utc_now() -> str:
@@ -242,3 +254,119 @@ class PigCycleStorage:
             row["fattening_feed_price"],
             row["derived_pig_corn_ratio"],
         )
+
+    def save_sow_monthly(self, record: SowMonthlyRecord) -> SowMonthlySaveStatus:
+        """Persist one monthly sow record and remember its source atomically."""
+        now = _utc_now()
+        source_type = record.source_type.value
+        publish_date = record.publish_date.isoformat() if record.publish_date is not None else None
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            processed = connection.execute(
+                """
+                SELECT business_key, source_type
+                FROM processed_sources
+                WHERE record_kind = 'sow_monthly' AND source_url = ?
+                """,
+                (record.source_url,),
+            ).fetchone()
+            if processed is not None and (
+                processed["business_key"] != record.month
+                or processed["source_type"] != source_type
+            ):
+                raise ValueError(
+                    "Sow monthly source URL is already mapped to a different month or source_type"
+                )
+            if processed is None:
+                connection.execute(
+                    """
+                    INSERT INTO processed_sources (
+                        record_kind, source_url, business_key, source_type,
+                        publish_date, processed_at
+                    ) VALUES ('sow_monthly', ?, ?, ?, ?, ?)
+                    """,
+                    (record.source_url, record.month, source_type, publish_date, now),
+                )
+
+            current = connection.execute(
+                """
+                SELECT *
+                FROM sow_monthly_records
+                WHERE month = ? AND source_type = ?
+                """,
+                (record.month, source_type),
+            ).fetchone()
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO sow_monthly_records (
+                        month, source_type, sow_inventory, mom_change, yoy_change,
+                        publish_date, source_url, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.month,
+                        source_type,
+                        record.sow_inventory,
+                        record.mom_change,
+                        record.yoy_change,
+                        publish_date,
+                        record.source_url,
+                        now,
+                        now,
+                    ),
+                )
+                status = SowMonthlySaveStatus.INSERTED
+            else:
+                current_publish_date = current["publish_date"]
+                content_matches = self._sow_business_content(record) == self._stored_sow_business_content(current)
+                if publish_date is None or current_publish_date is None:
+                    status = (
+                        SowMonthlySaveStatus.UNCHANGED
+                        if content_matches
+                        else SowMonthlySaveStatus.ORDER_UNKNOWN
+                    )
+                elif publish_date > current_publish_date:
+                    connection.execute(
+                        """
+                        UPDATE sow_monthly_records
+                        SET sow_inventory = ?, mom_change = ?, yoy_change = ?,
+                            publish_date = ?, source_url = ?, updated_at = ?
+                        WHERE month = ? AND source_type = ?
+                        """,
+                        (
+                            record.sow_inventory,
+                            record.mom_change,
+                            record.yoy_change,
+                            publish_date,
+                            record.source_url,
+                            now,
+                            record.month,
+                            source_type,
+                        ),
+                    )
+                    status = SowMonthlySaveStatus.UPDATED
+                elif publish_date < current_publish_date:
+                    status = SowMonthlySaveStatus.OLDER_IGNORED
+                elif content_matches:
+                    status = SowMonthlySaveStatus.UNCHANGED
+                else:
+                    status = SowMonthlySaveStatus.CONFLICT
+
+            connection.commit()
+            return status
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _sow_business_content(record: SowMonthlyRecord) -> tuple[object, ...]:
+        return (record.sow_inventory, record.mom_change, record.yoy_change)
+
+    @staticmethod
+    def _stored_sow_business_content(row: sqlite3.Row) -> tuple[object, ...]:
+        return (row["sow_inventory"], row["mom_change"], row["yoy_change"])

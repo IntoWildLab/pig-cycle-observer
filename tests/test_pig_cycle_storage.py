@@ -8,7 +8,12 @@ import pytest
 
 import src.pig_cycle.storage as storage_module
 from src.pig_cycle.moa_weekly import MoaWeeklyRecord
-from src.pig_cycle.storage import MoaWeeklySaveStatus, PigCycleStorage
+from src.pig_cycle.sow_monthly import SowMonthlyRecord, SowSourceType
+from src.pig_cycle.storage import (
+    MoaWeeklySaveStatus,
+    PigCycleStorage,
+    SowMonthlySaveStatus,
+)
 
 
 TABLES = {"moa_weekly_records", "sow_monthly_records", "processed_sources"}
@@ -32,6 +37,26 @@ def _weekly_record(
         soybean_meal_price=soybean_meal_price,
         fattening_feed_price=fattening_feed_price,
         derived_pig_corn_ratio=5.6,
+        source_url=source_url,
+    )
+
+
+def _sow_record(
+    *,
+    month: str = "2026-06",
+    source_type: SowSourceType = SowSourceType.MOA_REPORTED,
+    publish_date: date | None = date(2026, 7, 10),
+    source_url: str = "https://www.moa.gov.cn/sow-a.htm",
+    mom_change: float | None = -0.1,
+    yoy_change: float | None = -2.3,
+) -> SowMonthlyRecord:
+    return SowMonthlyRecord(
+        month=month,
+        sow_inventory=3780.0,
+        mom_change=mom_change,
+        yoy_change=yoy_change,
+        publish_date=publish_date,
+        source_type=source_type,
         source_url=source_url,
     )
 
@@ -407,4 +432,256 @@ def test_save_moa_weekly_rolls_back_processed_source_when_business_insert_fails(
         PigCycleStorage(initialized_db).save_moa_weekly(_weekly_record())
 
     assert _count(initialized_db, "moa_weekly_records") == 0
+    assert _count(initialized_db, "processed_sources") == 0
+
+
+def test_save_sow_monthly_inserts_record_and_processed_source(initialized_db: Path) -> None:
+    record = _sow_record()
+
+    assert PigCycleStorage(initialized_db).save_sow_monthly(record) is SowMonthlySaveStatus.INSERTED
+
+    stored = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    processed = _fetch_one(initialized_db, "SELECT * FROM processed_sources")
+    assert stored["month"] == record.month
+    assert stored["source_type"] == record.source_type.value
+    assert stored["sow_inventory"] == record.sow_inventory
+    assert stored["created_at"] == stored["updated_at"]
+    assert processed["record_kind"] == "sow_monthly"
+    assert processed["business_key"] == record.month
+    assert processed["source_type"] == record.source_type.value
+    assert processed["publish_date"] == record.publish_date.isoformat()
+    assert processed["processed_at"] == stored["created_at"]
+
+
+def test_save_sow_monthly_keeps_different_source_types_for_same_month(initialized_db: Path) -> None:
+    reported = _sow_record()
+    nbs = replace(
+        reported,
+        source_type=SowSourceType.NBS,
+        source_url="https://www.stats.gov.cn/sow-nbs.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+
+    assert storage.save_sow_monthly(reported) is SowMonthlySaveStatus.INSERTED
+    assert storage.save_sow_monthly(nbs) is SowMonthlySaveStatus.INSERTED
+    assert _count(initialized_db, "sow_monthly_records") == 2
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_identical_repeat_is_idempotent(initialized_db: Path) -> None:
+    record = _sow_record()
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(record)
+    before = _fetch_one(initialized_db, "SELECT created_at, updated_at FROM sow_monthly_records")
+    processed_before = _fetch_one(initialized_db, "SELECT processed_at FROM processed_sources")
+
+    assert storage.save_sow_monthly(record) is SowMonthlySaveStatus.UNCHANGED
+
+    after = _fetch_one(initialized_db, "SELECT created_at, updated_at FROM sow_monthly_records")
+    processed_after = _fetch_one(initialized_db, "SELECT processed_at FROM processed_sources")
+    assert tuple(after) == tuple(before)
+    assert tuple(processed_after) == tuple(processed_before)
+    assert _count(initialized_db, "processed_sources") == 1
+
+
+def test_save_sow_monthly_same_content_new_url_only_remembers_source(initialized_db: Path) -> None:
+    first = _sow_record()
+    second = replace(first, source_url="https://www.moa.gov.cn/sow-b.htm")
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+    before = _fetch_one(initialized_db, "SELECT source_url, updated_at FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(second) is SowMonthlySaveStatus.UNCHANGED
+
+    after = _fetch_one(initialized_db, "SELECT source_url, updated_at FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_newer_publication_updates_current_record(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = iter(("2026-07-10T01:00:00+00:00", "2026-07-11T01:00:00+00:00"))
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: next(times))
+    first = _sow_record()
+    corrected = replace(
+        first,
+        sow_inventory=3790.0,
+        publish_date=date(2026, 7, 11),
+        source_url="https://www.moa.gov.cn/sow-correction.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+
+    assert storage.save_sow_monthly(corrected) is SowMonthlySaveStatus.UPDATED
+
+    stored = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    assert stored["sow_inventory"] == 3790.0
+    assert stored["publish_date"] == "2026-07-11"
+    assert stored["source_url"] == corrected.source_url
+    assert stored["created_at"] == "2026-07-10T01:00:00+00:00"
+    assert stored["updated_at"] == "2026-07-11T01:00:00+00:00"
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_older_publication_is_ignored_but_remembered(initialized_db: Path) -> None:
+    current = _sow_record()
+    older = replace(
+        current,
+        sow_inventory=3770.0,
+        publish_date=date(2026, 7, 9),
+        source_url="https://www.moa.gov.cn/sow-older.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(current)
+    before = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(older) is SowMonthlySaveStatus.OLDER_IGNORED
+
+    after = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_same_publication_conflict_is_remembered(initialized_db: Path) -> None:
+    current = _sow_record()
+    conflicting = replace(
+        current,
+        sow_inventory=3790.0,
+        source_url="https://www.moa.gov.cn/sow-conflict.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(current)
+    before = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(conflicting) is SowMonthlySaveStatus.CONFLICT
+
+    after = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_without_dates_same_content_is_unchanged(initialized_db: Path) -> None:
+    first = _sow_record(publish_date=None)
+    second = replace(first, source_url="https://www.moa.gov.cn/sow-undated-b.htm")
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+
+    assert storage.save_sow_monthly(second) is SowMonthlySaveStatus.UNCHANGED
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+def test_save_sow_monthly_without_dates_changed_content_has_unknown_order(initialized_db: Path) -> None:
+    first = _sow_record(publish_date=None)
+    changed = replace(
+        first,
+        sow_inventory=3790.0,
+        source_url="https://www.moa.gov.cn/sow-undated-changed.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+    before = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(changed) is SowMonthlySaveStatus.ORDER_UNKNOWN
+
+    after = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+@pytest.mark.parametrize("current_date,new_date", [(None, date(2026, 7, 10)), (date(2026, 7, 10), None)])
+def test_save_sow_monthly_one_missing_date_changed_content_has_unknown_order(
+    initialized_db: Path, current_date: date | None, new_date: date | None
+) -> None:
+    first = _sow_record(publish_date=current_date)
+    changed = replace(
+        first,
+        sow_inventory=3790.0,
+        publish_date=new_date,
+        source_url="https://www.moa.gov.cn/sow-mixed-date.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+    before = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(changed) is SowMonthlySaveStatus.ORDER_UNKNOWN
+
+    after = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+
+
+@pytest.mark.parametrize("current_date,new_date", [(None, date(2026, 7, 10)), (date(2026, 7, 10), None)])
+def test_save_sow_monthly_one_missing_date_same_content_does_not_fill_publish_date(
+    initialized_db: Path, current_date: date | None, new_date: date | None
+) -> None:
+    first = _sow_record(publish_date=current_date)
+    same = replace(
+        first,
+        publish_date=new_date,
+        source_url="https://www.moa.gov.cn/sow-mixed-same.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+    before = _fetch_one(initialized_db, "SELECT publish_date, source_url, updated_at FROM sow_monthly_records")
+
+    assert storage.save_sow_monthly(same) is SowMonthlySaveStatus.UNCHANGED
+
+    after = _fetch_one(initialized_db, "SELECT publish_date, source_url, updated_at FROM sow_monthly_records")
+    assert tuple(after) == tuple(before)
+    assert _count(initialized_db, "processed_sources") == 2
+
+
+@pytest.mark.parametrize(
+    "remapped",
+    [
+        _sow_record(month="2026-07"),
+        _sow_record(source_type=SowSourceType.NBS),
+    ],
+    ids=["different-month", "different-source-type"],
+)
+def test_save_sow_monthly_rejects_source_remapping(
+    initialized_db: Path, remapped: SowMonthlyRecord
+) -> None:
+    first = _sow_record()
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+
+    with pytest.raises(ValueError, match="different month or source_type"):
+        storage.save_sow_monthly(remapped)
+
+    assert _count(initialized_db, "sow_monthly_records") == 1
+    assert _count(initialized_db, "processed_sources") == 1
+    processed = _fetch_one(initialized_db, "SELECT business_key, source_type FROM processed_sources")
+    assert tuple(processed) == (first.month, first.source_type.value)
+
+
+def test_save_sow_monthly_preserves_null_changes(initialized_db: Path) -> None:
+    record = _sow_record(mom_change=None, yoy_change=None)
+
+    assert PigCycleStorage(initialized_db).save_sow_monthly(record) is SowMonthlySaveStatus.INSERTED
+
+    stored = _fetch_one(initialized_db, "SELECT mom_change, yoy_change FROM sow_monthly_records")
+    assert stored["mom_change"] is None
+    assert stored["yoy_change"] is None
+
+
+def test_save_sow_monthly_rolls_back_processed_source_when_business_insert_fails(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_sow_monthly_insert
+            BEFORE INSERT ON sow_monthly_records
+            BEGIN
+                SELECT RAISE(ABORT, 'forced sow test failure');
+            END
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced sow test failure"):
+        PigCycleStorage(initialized_db).save_sow_monthly(_sow_record())
+
+    assert _count(initialized_db, "sow_monthly_records") == 0
     assert _count(initialized_db, "processed_sources") == 0
