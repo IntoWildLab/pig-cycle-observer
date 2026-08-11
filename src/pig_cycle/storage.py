@@ -389,6 +389,84 @@ class PigCycleStorage:
         rows = self._read_rows("SELECT month, source_type FROM sow_monthly_records")
         return {(row["month"], SowSourceType(row["source_type"])) for row in rows}
 
+    def get_record_counts(self) -> dict[str, int]:
+        """Return current row counts for the three pig-cycle tables."""
+        rows = self._read_rows(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM moa_weekly_records) AS moa_weekly,
+                (SELECT COUNT(*) FROM sow_monthly_records) AS sow_monthly,
+                (SELECT COUNT(*) FROM processed_sources) AS processed_sources
+            """
+        )
+        row = rows[0]
+        return {
+            "moa_weekly": int(row["moa_weekly"]),
+            "sow_monthly": int(row["sow_monthly"]),
+            "processed_sources": int(row["processed_sources"]),
+        }
+
+    def get_latest_moa_weekly_record(self) -> MoaWeeklyRecord | None:
+        """Return the record with the latest collection date, if present."""
+        rows = self._read_rows(
+            """
+            SELECT collection_date, publish_date, period_label, piglet_price,
+                   live_hog_price, corn_price, soybean_meal_price,
+                   fattening_feed_price, derived_pig_corn_ratio, source_url
+            FROM moa_weekly_records
+            ORDER BY collection_date DESC
+            LIMIT 1
+            """
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return MoaWeeklyRecord(
+            collection_date=date.fromisoformat(row["collection_date"]),
+            publish_date=date.fromisoformat(row["publish_date"]),
+            period_label=row["period_label"],
+            piglet_price=row["piglet_price"],
+            live_hog_price=row["live_hog_price"],
+            corn_price=row["corn_price"],
+            soybean_meal_price=row["soybean_meal_price"],
+            fattening_feed_price=row["fattening_feed_price"],
+            derived_pig_corn_ratio=row["derived_pig_corn_ratio"],
+            source_url=row["source_url"],
+        )
+
+    def get_latest_sow_monthly_records_by_source(self) -> list[SowMonthlyRecord]:
+        """Return each source type's latest current monthly sow record."""
+        rows = self._read_rows(
+            """
+            SELECT current.month, current.sow_inventory, current.mom_change,
+                   current.yoy_change, current.publish_date,
+                   current.source_type, current.source_url
+            FROM sow_monthly_records AS current
+            WHERE current.month = (
+                SELECT MAX(candidate.month)
+                FROM sow_monthly_records AS candidate
+                WHERE candidate.source_type = current.source_type
+            )
+            ORDER BY current.source_type ASC
+            """
+        )
+        return [
+            SowMonthlyRecord(
+                month=row["month"],
+                sow_inventory=row["sow_inventory"],
+                mom_change=row["mom_change"],
+                yoy_change=row["yoy_change"],
+                publish_date=(
+                    date.fromisoformat(row["publish_date"])
+                    if row["publish_date"] is not None
+                    else None
+                ),
+                source_type=SowSourceType(row["source_type"]),
+                source_url=row["source_url"],
+            )
+            for row in rows
+        ]
+
     def _get_processed_source_urls(self, record_kind: str) -> set[str]:
         rows = self._read_rows(
             "SELECT source_url FROM processed_sources WHERE record_kind = ?",

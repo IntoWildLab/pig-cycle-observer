@@ -819,6 +819,9 @@ def test_known_state_reads_do_not_change_timestamps(initialized_db: Path) -> Non
     storage.get_sow_monthly_processed_urls()
     storage.get_moa_weekly_collection_dates()
     storage.get_sow_monthly_business_keys()
+    storage.get_record_counts()
+    storage.get_latest_moa_weekly_record()
+    storage.get_latest_sow_monthly_records_by_source()
 
     assert _timestamp_state(initialized_db) == before
 
@@ -832,6 +835,144 @@ def test_known_state_reads_return_empty_sets_for_initialized_empty_database(init
     assert storage.get_sow_monthly_business_keys() == set()
 
 
+def test_get_record_counts_returns_exact_table_counts(initialized_db: Path) -> None:
+    storage = PigCycleStorage(initialized_db)
+    assert storage.get_record_counts() == {
+        "moa_weekly": 0,
+        "sow_monthly": 0,
+        "processed_sources": 0,
+    }
+
+    weekly = _weekly_record()
+    storage.save_moa_weekly(weekly)
+    storage.save_moa_weekly(
+        replace(
+            weekly,
+            publish_date=date(2026, 8, 5),
+            source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-revision.htm",
+        )
+    )
+    storage.save_sow_monthly(_sow_record())
+
+    assert storage.get_record_counts() == {
+        "moa_weekly": 1,
+        "sow_monthly": 1,
+        "processed_sources": 3,
+    }
+
+
+def test_get_latest_moa_weekly_record_uses_collection_date(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    latest = replace(
+        _weekly_record(),
+        collection_date=date(2026, 8, 6),
+        publish_date=date(2026, 8, 11),
+        period_label="8月第1周",
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-latest.htm",
+    )
+    older_with_later_publication = replace(
+        _weekly_record(),
+        collection_date=date(2026, 7, 23),
+        publish_date=date(2026, 8, 12),
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-old-corrected.htm",
+    )
+    storage.save_moa_weekly(latest)
+    storage.save_moa_weekly(older_with_later_publication)
+
+    result = storage.get_latest_moa_weekly_record()
+
+    assert isinstance(result, MoaWeeklyRecord)
+    assert result == latest
+
+
+def test_get_latest_moa_weekly_record_returns_none_for_empty_table(
+    initialized_db: Path,
+) -> None:
+    assert PigCycleStorage(initialized_db).get_latest_moa_weekly_record() is None
+
+
+def test_get_latest_moa_weekly_record_restores_null_optional_prices(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    record = _weekly_record(soybean_meal_price=None, fattening_feed_price=None)
+    storage.save_moa_weekly(record)
+
+    result = storage.get_latest_moa_weekly_record()
+
+    assert result is not None
+    assert result.soybean_meal_price is None
+    assert result.fattening_feed_price is None
+
+
+def test_get_latest_sow_monthly_records_selects_latest_per_source(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    reported_old = replace(
+        _sow_record(),
+        month="2026-04",
+        source_url="https://www.moa.gov.cn/sow-reported-old.htm",
+    )
+    reported_latest = replace(
+        _sow_record(),
+        month="2026-05",
+        source_url="https://www.moa.gov.cn/sow-reported-latest.htm",
+    )
+    nbs_old = replace(
+        _sow_record(),
+        month="2026-05",
+        source_type=SowSourceType.NBS,
+        source_url="https://www.stats.gov.cn/sow-nbs-old.htm",
+    )
+    nbs_latest = replace(
+        _sow_record(),
+        month="2026-06",
+        source_type=SowSourceType.NBS,
+        source_url="https://www.stats.gov.cn/sow-nbs-latest.htm",
+    )
+    for record in (reported_old, reported_latest, nbs_old, nbs_latest):
+        storage.save_sow_monthly(record)
+
+    result = storage.get_latest_sow_monthly_records_by_source()
+
+    assert result == [reported_latest, nbs_latest]
+    assert all(isinstance(record.source_type, SowSourceType) for record in result)
+
+
+def test_get_latest_sow_monthly_records_keeps_same_month_sources(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    reported = _sow_record()
+    nbs = replace(
+        reported,
+        source_type=SowSourceType.NBS,
+        source_url="https://www.stats.gov.cn/sow-same-month.htm",
+    )
+    storage.save_sow_monthly(reported)
+    storage.save_sow_monthly(nbs)
+
+    assert storage.get_latest_sow_monthly_records_by_source() == [reported, nbs]
+
+
+def test_get_latest_sow_monthly_records_restores_null_fields(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    record = _sow_record(publish_date=None, mom_change=None, yoy_change=None)
+    storage.save_sow_monthly(record)
+
+    result = storage.get_latest_sow_monthly_records_by_source()
+
+    assert result == [record]
+    assert result[0].publish_date is None
+    assert result[0].mom_change is None
+    assert result[0].yoy_change is None
+
+
 @pytest.mark.parametrize(
     "method_name",
     [
@@ -839,6 +980,9 @@ def test_known_state_reads_return_empty_sets_for_initialized_empty_database(init
         "get_sow_monthly_processed_urls",
         "get_moa_weekly_collection_dates",
         "get_sow_monthly_business_keys",
+        "get_record_counts",
+        "get_latest_moa_weekly_record",
+        "get_latest_sow_monthly_records_by_source",
     ],
 )
 def test_known_state_reads_reject_missing_database_without_creating_it(
@@ -860,6 +1004,9 @@ def test_known_state_reads_reject_missing_database_without_creating_it(
         "get_sow_monthly_processed_urls",
         "get_moa_weekly_collection_dates",
         "get_sow_monthly_business_keys",
+        "get_record_counts",
+        "get_latest_moa_weekly_record",
+        "get_latest_sow_monthly_records_by_source",
     ],
 )
 def test_known_state_reads_expose_uninitialized_schema_error(
