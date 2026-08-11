@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 
 from .moa_weekly import MoaWeeklyRecord
-from .sow_monthly import SowMonthlyRecord
+from .sow_monthly import SowMonthlyRecord, SowSourceType
 
 
 class MoaWeeklySaveStatus(str, Enum):
@@ -370,3 +370,43 @@ class PigCycleStorage:
     @staticmethod
     def _stored_sow_business_content(row: sqlite3.Row) -> tuple[object, ...]:
         return (row["sow_inventory"], row["mom_change"], row["yoy_change"])
+
+    def get_moa_weekly_processed_urls(self) -> set[str]:
+        """Return every successfully processed MOA weekly source URL."""
+        return self._get_processed_source_urls("moa_weekly")
+
+    def get_sow_monthly_processed_urls(self) -> set[str]:
+        """Return every successfully processed monthly sow source URL."""
+        return self._get_processed_source_urls("sow_monthly")
+
+    def get_moa_weekly_collection_dates(self) -> set[date]:
+        """Return the collection dates of current MOA weekly records."""
+        rows = self._read_rows("SELECT collection_date FROM moa_weekly_records")
+        return {date.fromisoformat(row["collection_date"]) for row in rows}
+
+    def get_sow_monthly_business_keys(self) -> set[tuple[str, SowSourceType]]:
+        """Return every current monthly sow business key."""
+        rows = self._read_rows("SELECT month, source_type FROM sow_monthly_records")
+        return {(row["month"], SowSourceType(row["source_type"])) for row in rows}
+
+    def _get_processed_source_urls(self, record_kind: str) -> set[str]:
+        rows = self._read_rows(
+            "SELECT source_url FROM processed_sources WHERE record_kind = ?",
+            (record_kind,),
+        )
+        return {row["source_url"] for row in rows}
+
+    def _read_rows(
+        self,
+        query: str,
+        parameters: tuple[object, ...] = (),
+    ) -> list[sqlite3.Row]:
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            return connection.execute(query, parameters).fetchall()
+        finally:
+            connection.close()

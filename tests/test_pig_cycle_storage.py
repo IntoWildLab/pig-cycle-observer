@@ -76,6 +76,24 @@ def _count(db_path: Path, table: str) -> int:
     return int(row[0])
 
 
+def _timestamp_state(db_path: Path) -> tuple[list[tuple[object, ...]], ...]:
+    with closing(sqlite3.connect(db_path)) as connection:
+        weekly = connection.execute(
+            "SELECT collection_date, created_at, updated_at FROM moa_weekly_records ORDER BY collection_date"
+        ).fetchall()
+        sow = connection.execute(
+            "SELECT month, source_type, created_at, updated_at FROM sow_monthly_records ORDER BY month, source_type"
+        ).fetchall()
+        processed = connection.execute(
+            """
+            SELECT record_kind, source_url, processed_at
+            FROM processed_sources
+            ORDER BY record_kind, source_url
+            """
+        ).fetchall()
+    return (weekly, sow, processed)
+
+
 def _table_names(db_path: Path) -> set[str]:
     with closing(sqlite3.connect(db_path)) as connection:
         rows = connection.execute(
@@ -685,3 +703,174 @@ def test_save_sow_monthly_rolls_back_processed_source_when_business_insert_fails
 
     assert _count(initialized_db, "sow_monthly_records") == 0
     assert _count(initialized_db, "processed_sources") == 0
+
+
+def test_get_moa_weekly_processed_urls_includes_all_processed_outcomes(initialized_db: Path) -> None:
+    first = _weekly_record()
+    newer = replace(
+        first,
+        publish_date=date(2026, 8, 5),
+        piglet_price=24.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-newer.htm",
+    )
+    older = replace(
+        first,
+        publish_date=date(2026, 8, 3),
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-older-known.htm",
+    )
+    conflict = replace(
+        newer,
+        live_hog_price=15.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-conflict-known.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+    storage.save_moa_weekly(newer)
+    storage.save_moa_weekly(older)
+    storage.save_moa_weekly(conflict)
+
+    assert storage.get_moa_weekly_processed_urls() == {
+        first.source_url,
+        newer.source_url,
+        older.source_url,
+        conflict.source_url,
+    }
+    assert _fetch_one(initialized_db, "SELECT source_url FROM moa_weekly_records")["source_url"] == newer.source_url
+
+
+def test_get_sow_monthly_processed_urls_includes_non_current_sources(initialized_db: Path) -> None:
+    first = _sow_record()
+    conflict = replace(
+        first,
+        sow_inventory=3790.0,
+        source_url="https://www.moa.gov.cn/sow-known-conflict.htm",
+    )
+    unknown_order = replace(
+        first,
+        sow_inventory=3800.0,
+        publish_date=None,
+        source_url="https://www.moa.gov.cn/sow-known-undated.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(first)
+    storage.save_sow_monthly(conflict)
+    storage.save_sow_monthly(unknown_order)
+
+    assert storage.get_sow_monthly_processed_urls() == {
+        first.source_url,
+        conflict.source_url,
+        unknown_order.source_url,
+    }
+
+
+def test_get_moa_weekly_collection_dates_returns_python_dates(initialized_db: Path) -> None:
+    first = _weekly_record()
+    second = replace(
+        first,
+        collection_date=date(2026, 8, 6),
+        publish_date=date(2026, 8, 11),
+        source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-next.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+    storage.save_moa_weekly(second)
+
+    result = storage.get_moa_weekly_collection_dates()
+
+    assert result == {date(2026, 7, 30), date(2026, 8, 6)}
+    assert all(isinstance(value, date) for value in result)
+
+
+def test_get_sow_monthly_business_keys_preserves_source_type(initialized_db: Path) -> None:
+    reported = _sow_record()
+    nbs = replace(
+        reported,
+        source_type=SowSourceType.NBS,
+        source_url="https://www.stats.gov.cn/sow-known-nbs.htm",
+    )
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(reported)
+    storage.save_sow_monthly(nbs)
+
+    assert storage.get_sow_monthly_business_keys() == {
+        ("2026-06", SowSourceType.MOA_REPORTED),
+        ("2026-06", SowSourceType.NBS),
+    }
+
+
+def test_processed_url_readers_keep_record_kinds_separate(initialized_db: Path) -> None:
+    weekly = _weekly_record()
+    sow = _sow_record()
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(weekly)
+    storage.save_sow_monthly(sow)
+
+    assert storage.get_moa_weekly_processed_urls() == {weekly.source_url}
+    assert storage.get_sow_monthly_processed_urls() == {sow.source_url}
+
+
+def test_known_state_reads_do_not_change_timestamps(initialized_db: Path) -> None:
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(_weekly_record())
+    storage.save_sow_monthly(_sow_record())
+    before = _timestamp_state(initialized_db)
+
+    storage.get_moa_weekly_processed_urls()
+    storage.get_sow_monthly_processed_urls()
+    storage.get_moa_weekly_collection_dates()
+    storage.get_sow_monthly_business_keys()
+
+    assert _timestamp_state(initialized_db) == before
+
+
+def test_known_state_reads_return_empty_sets_for_initialized_empty_database(initialized_db: Path) -> None:
+    storage = PigCycleStorage(initialized_db)
+
+    assert storage.get_moa_weekly_processed_urls() == set()
+    assert storage.get_sow_monthly_processed_urls() == set()
+    assert storage.get_moa_weekly_collection_dates() == set()
+    assert storage.get_sow_monthly_business_keys() == set()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_moa_weekly_processed_urls",
+        "get_sow_monthly_processed_urls",
+        "get_moa_weekly_collection_dates",
+        "get_sow_monthly_business_keys",
+    ],
+)
+def test_known_state_reads_reject_missing_database_without_creating_it(
+    tmp_path: Path, method_name: str
+) -> None:
+    db_path = tmp_path / "missing.sqlite3"
+    storage = PigCycleStorage(db_path)
+
+    with pytest.raises(FileNotFoundError):
+        getattr(storage, method_name)()
+
+    assert not db_path.exists()
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "get_moa_weekly_processed_urls",
+        "get_sow_monthly_processed_urls",
+        "get_moa_weekly_collection_dates",
+        "get_sow_monthly_business_keys",
+    ],
+)
+def test_known_state_reads_expose_uninitialized_schema_error(
+    tmp_path: Path, method_name: str
+) -> None:
+    db_path = tmp_path / "uninitialized.sqlite3"
+    with closing(sqlite3.connect(db_path)):
+        pass
+    storage = PigCycleStorage(db_path)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        getattr(storage, method_name)()
+
+    assert _table_names(db_path) == set()
