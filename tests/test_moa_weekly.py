@@ -16,6 +16,7 @@ from src.pig_cycle.moa_weekly import (
     discover_weekly_article_urls,
     fetch_latest_weekly_increment,
     fetch_recent_weekly_records,
+    iter_recent_weekly_records,
     parse_weekly_record,
     sort_and_deduplicate_records,
 )
@@ -213,6 +214,9 @@ class _FakeSession:
         if isinstance(value, _FakeResponse):
             return value
         return _FakeResponse(value, url=url)
+
+    def close(self) -> None:
+        pass
 
 
 def test_http_layer_decodes_utf8_bytes_despite_iso_8859_1_response_encoding() -> None:
@@ -454,3 +458,92 @@ def test_history_stops_immediately_after_reaching_min_weeks() -> None:
 
     assert len(records) == 1
     assert [url for url, _, _ in session.calls] == [base, first]
+
+
+def test_history_iterator_streams_unknown_articles_without_date_deduplication() -> None:
+    base = "https://xmsyj.moa.gov.cn/jcyj/"
+    known = f"{base}known.htm"
+    first = f"{base}first.htm"
+    correction = f"{base}correction.htm"
+    session = _FakeSession({
+        base: (
+            f'<a href="{known}">7月第5周畜产品和饲料集贸市场价格情况</a>'
+            f'<a href="{first}">7月第5周畜产品和饲料集贸市场价格情况</a>'
+            f'<a href="{correction}">7月第5周畜产品和饲料集贸市场价格情况</a>'
+        ),
+        first: _article_html("2026-08-04", "7月第5周（采集日为7月30日）", PRICES_JULY),
+        correction: _article_html("2026-08-05", "7月第5周（采集日为7月30日）", PRICES_JULY),
+    })
+    records = iter_recent_weekly_records(
+        known_urls={known}, max_pages=1, max_articles=2, max_requests=3, session=session
+    )
+
+    first_record = next(records)
+    assert first_record.source_url == first
+    assert [url for url, _, _ in session.calls] == [base, first]
+    second_record = next(records)
+    assert second_record.source_url == correction
+    assert first_record.collection_date == second_record.collection_date
+    assert [url for url, _, _ in session.calls] == [base, first, correction]
+    records.close()
+
+
+def test_history_iterator_request_and_article_limits_are_hard() -> None:
+    base = "https://xmsyj.moa.gov.cn/jcyj/"
+    first = f"{base}first.htm"
+    second = f"{base}second.htm"
+    pages = {
+        base: (
+            f'<a href="{first}">7月第5周畜产品和饲料集贸市场价格情况</a>'
+            f'<a href="{second}">7月第4周畜产品和饲料集贸市场价格情况</a>'
+        ),
+        first: _article_html("2026-08-04", "7月第5周（采集日为7月30日）", PRICES_JULY),
+    }
+    session = _FakeSession(pages)
+    records = iter_recent_weekly_records(
+        max_pages=1, max_articles=1, max_requests=2, session=session
+    )
+    assert next(records).source_url == first
+    with pytest.raises(MoaWeeklyDataError, match="article limit exhausted"):
+        next(records)
+    assert [url for url, _, _ in session.calls] == [base, first]
+
+    budget_session = _FakeSession(pages)
+    budget_records = iter_recent_weekly_records(
+        max_pages=1, max_articles=2, max_requests=1, session=budget_session
+    )
+    with pytest.raises(MoaWeeklyDataError, match="request budget exhausted"):
+        next(budget_records)
+    assert [url for url, _, _ in budget_session.calls] == [base]
+
+
+def test_history_iterator_closes_only_its_own_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = "https://xmsyj.moa.gov.cn/jcyj/"
+    article = f"{base}article.htm"
+
+    class TrackingSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__({
+                base: f'<a href="{article}">7月第5周畜产品和饲料集贸市场价格情况</a>',
+                article: _article_html(
+                    "2026-08-04", "7月第5周（采集日为7月30日）", PRICES_JULY
+                ),
+            })
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    owned = TrackingSession()
+    monkeypatch.setattr("src.pig_cycle.moa_weekly.requests.Session", lambda: owned)
+    records = iter_recent_weekly_records()
+    assert next(records).source_url == article
+    assert owned.closed is False
+    records.close()
+    assert owned.closed is True
+
+    caller = TrackingSession()
+    caller_records = iter_recent_weekly_records(max_pages=1, session=caller)
+    next(caller_records)
+    caller_records.close()
+    assert caller.closed is False

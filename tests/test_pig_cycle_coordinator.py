@@ -10,6 +10,7 @@ import pytest
 
 import src.pig_cycle.coordinator as coordinator_module
 from src.pig_cycle.coordinator import (
+    run_moa_weekly_history,
     run_moa_weekly_increment,
     run_sow_monthly_official_url,
 )
@@ -573,3 +574,101 @@ def test_sow_uninitialized_database_fails_before_fetch(
     with pytest.raises(sqlite3.OperationalError, match="no such table"):
         run_sow_monthly_official_url(storage, SOW_URL_A)
     assert called is False
+
+
+def test_history_returns_without_network_when_target_is_already_met(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.save_moa_weekly(_weekly_record())
+    monkeypatch.setattr(
+        coordinator_module,
+        "iter_recent_weekly_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("network must not start")),
+    )
+    assert run_moa_weekly_history(storage, target_total_records=1) == []
+
+
+def test_history_streams_each_record_to_storage_and_stops_at_target(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _weekly_record(source_url=URL_A)
+    second = replace(
+        first,
+        collection_date=date(2026, 7, 23),
+        publish_date=date(2026, 7, 28),
+        source_url=URL_B,
+    )
+    third = replace(second, collection_date=date(2026, 7, 16), source_url="https://xmsyj.moa.gov.cn/jcyj/weekly-c.htm")
+    yielded = 0
+    received: dict[str, object] = {}
+
+    def fake_iterator(**kwargs: object):
+        nonlocal yielded
+        received.update(kwargs)
+        for record in (first, second, third):
+            yielded += 1
+            yield record
+
+    monkeypatch.setattr(coordinator_module, "iter_recent_weekly_records", fake_iterator)
+    result = run_moa_weekly_history(
+        storage,
+        target_total_records=2,
+        max_pages=2,
+        max_articles=6,
+        max_requests=8,
+        timeout=7.5,
+        session=object(),
+    )
+    assert result == [
+        (first, MoaWeeklySaveStatus.INSERTED),
+        (second, MoaWeeklySaveStatus.INSERTED),
+    ]
+    assert yielded == 2
+    assert received["known_urls"] == set()
+    assert "known_dates" not in received
+    assert storage.get_moa_weekly_processed_urls() == {URL_A, URL_B}
+
+
+def test_history_same_date_urls_both_reach_storage(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _weekly_record(source_url=URL_A)
+    revised = replace(first, publish_date=date(2026, 8, 5), source_url=URL_B)
+    monkeypatch.setattr(
+        coordinator_module,
+        "iter_recent_weekly_records",
+        lambda **kwargs: iter((first, revised)),
+    )
+    result = run_moa_weekly_history(storage, target_total_records=2)
+    assert result == [
+        (first, MoaWeeklySaveStatus.INSERTED),
+        (revised, MoaWeeklySaveStatus.UPDATED),
+    ]
+    assert storage.get_moa_weekly_processed_urls() == {URL_A, URL_B}
+
+
+def test_history_save_error_stops_iterator_and_propagates(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _weekly_record()
+    consumed = 0
+    closed = False
+
+    def fake_iterator(**kwargs: object):
+        nonlocal consumed, closed
+        try:
+            consumed += 1
+            yield record
+            consumed += 1
+            yield replace(record, source_url=URL_B)
+        finally:
+            closed = True
+
+    expected = sqlite3.OperationalError("write failed")
+    monkeypatch.setattr(coordinator_module, "iter_recent_weekly_records", fake_iterator)
+    monkeypatch.setattr(storage, "save_moa_weekly", lambda value: (_ for _ in ()).throw(expected))
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        run_moa_weekly_history(storage)
+    assert raised.value is expected
+    assert consumed == 1
+    assert closed is True

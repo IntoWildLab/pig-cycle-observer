@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -329,6 +329,54 @@ def fetch_recent_weekly_records(
         f"Only found {len(sort_and_deduplicate_records(records))} unique MOA weekly records "
         f"after scanning {max_pages} index pages; required {min_weeks}"
     )
+
+
+def iter_recent_weekly_records(
+    *,
+    known_urls: Optional[Iterable[str]] = None,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    max_articles: int = MAX_HISTORY_ARTICLES,
+    max_requests: int = MAX_HISTORY_REQUESTS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    session: Optional[requests.Session] = None,
+) -> Iterator[MoaWeeklyRecord]:
+    """Yield unknown MOA weekly articles one at a time under hard request limits."""
+    if not 1 <= max_pages <= MAX_HISTORY_PAGES:
+        raise ValueError(f"max_pages must be between 1 and {MAX_HISTORY_PAGES}")
+    if not 1 <= max_articles <= MAX_HISTORY_ARTICLES:
+        raise ValueError(f"max_articles must be between 1 and {MAX_HISTORY_ARTICLES}")
+    if not 1 <= max_requests <= MAX_HISTORY_REQUESTS:
+        raise ValueError(f"max_requests must be between 1 and {MAX_HISTORY_REQUESTS}")
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+
+    known_url_set = set(known_urls or ())
+    visited_articles: set[str] = set()
+    owns_session = session is None
+    http = session or requests.Session()
+    http.headers.update({"User-Agent": DEFAULT_USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
+    budget = _RequestBudget(max_requests)
+    article_requests = 0
+    try:
+        for page_number in range(max_pages):
+            index_url = _index_url(page_number)
+            index_html = _get_html(http, index_url, timeout, budget=budget)
+            for article_url in discover_weekly_article_urls(index_html, index_url=index_url):
+                if article_url in known_url_set or article_url in visited_articles:
+                    continue
+                if article_requests >= max_articles:
+                    raise MoaWeeklyDataError(
+                        f"MOA weekly history article limit exhausted ({article_requests}/{max_articles})"
+                    )
+                visited_articles.add(article_url)
+                article_requests += 1
+                yield parse_weekly_record(
+                    _get_html(http, article_url, timeout, budget=budget),
+                    source_url=article_url,
+                )
+    finally:
+        if owns_session:
+            http.close()
 
 
 def fetch_latest_weekly_increment(
