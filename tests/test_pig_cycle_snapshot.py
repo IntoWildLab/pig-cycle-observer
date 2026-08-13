@@ -42,10 +42,11 @@ def _sow_record(
     publish_date: date | None = date(2026, 7, 16),
     mom_change: float | None = -0.1,
     yoy_change: float | None = 2.3,
+    sow_inventory: float = 3780.0,
 ) -> SowMonthlyRecord:
     return SowMonthlyRecord(
         month=month,
-        sow_inventory=3780.0,
+        sow_inventory=sow_inventory,
         mom_change=mom_change,
         yoy_change=yoy_change,
         publish_date=publish_date,
@@ -119,8 +120,8 @@ def test_sow_snapshot_displays_all_fields(storage: PigCycleStorage) -> None:
         "来源类型：nbs",
         "数据月份：2026-06",
         "存栏：3780 万头",
-        "环比：-0.1%",
-        "同比：2.3%",
+        "官方环比：-0.1%",
+        "官方同比：2.3%",
         "发布日期：2026-07-16",
         record.source_url,
     ):
@@ -140,10 +141,13 @@ def test_same_month_multiple_sow_sources_are_displayed(
     storage.save_sow_monthly(reported)
 
     text = build_pig_cycle_snapshot(storage)
+    latest_section = text.split("能繁母猪月度最新数据（按来源）", 1)[1].split(
+        "能繁母猪历史", 1
+    )[0]
 
-    assert "来源类型：nbs" in text
-    assert "来源类型：moa_reported" in text
-    assert text.count("数据月份：2026-06") == 2
+    assert "来源类型：nbs" in latest_section
+    assert "来源类型：moa_reported" in latest_section
+    assert latest_section.count("数据月份：2026-06") == 2
 
 
 def test_each_sow_source_displays_its_own_latest_month(
@@ -180,8 +184,8 @@ def test_optional_none_values_are_displayed_as_unavailable(
 
     assert "- 豆粕：暂无" in text
     assert "- 育肥猪配合饲料：暂无" in text
-    assert "  - 环比：暂无" in text
-    assert "  - 同比：暂无" in text
+    assert "  - 官方环比：暂无" in text
+    assert "  - 官方同比：暂无" in text
     assert "  - 发布日期：暂无" in text
 
 
@@ -245,3 +249,118 @@ def test_main_prints_snapshot_and_returns_zero(
     assert main([str(storage.db_path)]) == 0
 
     assert capsys.readouterr().out == expected + "\n"
+
+
+def test_sow_history_displays_mechanical_changes_and_real_publish_dates(
+    storage: PigCycleStorage,
+) -> None:
+    records = [
+        _sow_record(
+            month="2025-12",
+            sow_inventory=3961.0,
+            publish_date=date(2026, 1, 19),
+            mom_change=None,
+            yoy_change=None,
+            source_url="https://www.stats.gov.cn/2025-12.htm",
+        ),
+        _sow_record(
+            month="2026-03",
+            sow_inventory=3904.0,
+            publish_date=date(2026, 4, 17),
+            mom_change=None,
+            yoy_change=None,
+            source_url="https://www.stats.gov.cn/2026-03.htm",
+        ),
+        _sow_record(
+            month="2026-06",
+            sow_inventory=3780.0,
+            publish_date=date(2026, 7, 16),
+            mom_change=None,
+            yoy_change=None,
+            source_url="https://www.stats.gov.cn/2026-06.htm",
+        ),
+    ]
+    for record in reversed(records):
+        storage.save_sow_monthly(record)
+
+    text = build_pig_cycle_snapshot(storage)
+
+    history = text.split("能繁母猪历史（nbs）", 1)[1]
+    assert history.index("2025-12：3961 万头") < history.index("2026-03：3904 万头")
+    assert history.index("2026-03：3904 万头") < history.index("2026-06：3780 万头")
+    assert "较上一条记录：-57 万头，-1.44%" in history
+    assert "较上一条记录：-124 万头，-3.18%" in history
+    assert "发布日期：2026-01-19" in history
+    assert "所示记录方向：连续下降" in history
+    assert "较上一条记录：" in history
+    assert "较上一条记录：环比" not in history
+
+
+def test_sow_history_keeps_sources_separate(storage: PigCycleStorage) -> None:
+    storage.save_sow_monthly(
+        _sow_record(
+            month="2026-03",
+            sow_inventory=3904.0,
+            source_url="https://www.stats.gov.cn/2026-03.htm",
+        )
+    )
+    storage.save_sow_monthly(
+        _sow_record(
+            month="2026-06",
+            sow_inventory=3780.0,
+            source_url="https://www.stats.gov.cn/2026-06.htm",
+        )
+    )
+    storage.save_sow_monthly(
+        _sow_record(
+            month="2026-05",
+            sow_inventory=4000.0,
+            source_type=SowSourceType.MOA_REPORTED,
+            source_url="https://www.moa.gov.cn/2026-05.htm",
+        )
+    )
+
+    text = build_pig_cycle_snapshot(storage)
+    reported_start = text.index("能繁母猪历史（moa_reported）")
+    nbs_start = text.index("能繁母猪历史（nbs）")
+    reported = text[reported_start:nbs_start]
+    nbs = text[nbs_start:]
+
+    assert "2026-03：3904 万头" in nbs
+    assert "2026-06：3780 万头" in nbs
+    assert "2026-05：4000 万头" not in nbs
+    assert "2026-05：4000 万头" in reported
+    assert "较上一条记录" not in reported
+    assert "所示记录方向：记录不足" in reported
+
+
+@pytest.mark.parametrize(
+    ("inventories", "expected"),
+    [
+        ([3900.0, 3910.0, 3920.0], "连续上升"),
+        ([3900.0, 3900.0, 3900.0], "持平"),
+        ([3900.0, 3910.0, 3905.0], "混合"),
+    ],
+)
+def test_sow_history_direction_is_a_mechanical_description(
+    storage: PigCycleStorage,
+    inventories: list[float],
+    expected: str,
+) -> None:
+    for index, (month, inventory) in enumerate(
+        zip(("2026-01", "2026-02", "2026-03"), inventories),
+        start=1,
+    ):
+        storage.save_sow_monthly(
+            _sow_record(
+                month=month,
+                sow_inventory=inventory,
+                source_url=f"https://www.stats.gov.cn/{index}.htm",
+            )
+        )
+
+    text = build_pig_cycle_snapshot(storage)
+
+    assert f"所示记录方向：{expected}" in text
+    for forbidden in ("产能去化期", "底部形成期", "买入", "卖出", "投资建议"):
+        assert forbidden not in text

@@ -450,22 +450,68 @@ class PigCycleStorage:
             ORDER BY current.source_type ASC
             """
         )
-        return [
-            SowMonthlyRecord(
-                month=row["month"],
-                sow_inventory=row["sow_inventory"],
-                mom_change=row["mom_change"],
-                yoy_change=row["yoy_change"],
-                publish_date=(
-                    date.fromisoformat(row["publish_date"])
-                    if row["publish_date"] is not None
-                    else None
-                ),
-                source_type=SowSourceType(row["source_type"]),
-                source_url=row["source_url"],
+        return [self._sow_record_from_row(row) for row in rows]
+
+    def get_sow_monthly_history(
+        self,
+        *,
+        source_type: SowSourceType,
+        limit: int | None = None,
+    ) -> list[SowMonthlyRecord]:
+        """Return current records for one source type in ascending month order."""
+        if not isinstance(source_type, SowSourceType):
+            raise TypeError("source_type must be a SowSourceType")
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+            raise TypeError("limit must be a positive integer or None")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be greater than zero")
+
+        columns = """
+            month, sow_inventory, mom_change, yoy_change,
+            publish_date, source_type, source_url
+        """
+        if limit is None:
+            rows = self._read_rows(
+                f"""
+                SELECT {columns}
+                FROM sow_monthly_records
+                WHERE source_type = ?
+                ORDER BY month ASC
+                """,
+                (source_type.value,),
             )
-            for row in rows
-        ]
+        else:
+            rows = self._read_rows(
+                f"""
+                SELECT {columns}
+                FROM (
+                    SELECT {columns}
+                    FROM sow_monthly_records
+                    WHERE source_type = ?
+                    ORDER BY month DESC
+                    LIMIT ?
+                )
+                ORDER BY month ASC
+                """,
+                (source_type.value, limit),
+            )
+        return [self._sow_record_from_row(row) for row in rows]
+
+    @staticmethod
+    def _sow_record_from_row(row: sqlite3.Row) -> SowMonthlyRecord:
+        return SowMonthlyRecord(
+            month=row["month"],
+            sow_inventory=row["sow_inventory"],
+            mom_change=row["mom_change"],
+            yoy_change=row["yoy_change"],
+            publish_date=(
+                date.fromisoformat(row["publish_date"])
+                if row["publish_date"] is not None
+                else None
+            ),
+            source_type=SowSourceType(row["source_type"]),
+            source_url=row["source_url"],
+        )
 
     def _get_processed_source_urls(self, record_kind: str) -> set[str]:
         rows = self._read_rows(

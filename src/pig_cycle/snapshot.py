@@ -6,7 +6,7 @@ import argparse
 from datetime import date
 from typing import Sequence
 
-from .sow_monthly import SowMonthlyRecord
+from .sow_monthly import SowMonthlyRecord, SowSourceType
 from .storage import PigCycleStorage
 
 
@@ -27,11 +27,53 @@ def _format_sow_record(record: SowMonthlyRecord) -> list[str]:
         f"- 来源类型：{record.source_type.value}",
         f"  - 数据月份：{record.month}",
         f"  - 存栏：{record.sow_inventory:g} 万头",
-        f"  - 环比：{_format_change(record.mom_change)}",
-        f"  - 同比：{_format_change(record.yoy_change)}",
+        f"  - 官方环比：{_format_change(record.mom_change)}",
+        f"  - 官方同比：{_format_change(record.yoy_change)}",
         f"  - 发布日期：{_format_date(record.publish_date)}",
         f"  - 来源 URL：{record.source_url}",
     ]
+
+
+def _format_sow_history(records: list[SowMonthlyRecord]) -> list[str]:
+    lines: list[str] = []
+    for index, record in enumerate(records):
+        lines.append(f"- {record.month}：{record.sow_inventory:g} 万头")
+        if index > 0:
+            previous = records[index - 1]
+            absolute_change = record.sow_inventory - previous.sow_inventory
+            if previous.sow_inventory == 0:
+                percentage = "暂无"
+            else:
+                percentage = f"{absolute_change / previous.sow_inventory * 100:+.2f}%"
+            lines.append(
+                f"  - 较上一条记录：{absolute_change:+g} 万头，{percentage}"
+            )
+        lines.extend(
+            [
+                f"  - 官方环比：{_format_change(record.mom_change)}",
+                f"  - 官方同比：{_format_change(record.yoy_change)}",
+                f"  - 发布日期：{_format_date(record.publish_date)}",
+                f"  - 来源 URL：{record.source_url}",
+            ]
+        )
+    lines.append(f"所示记录方向：{_describe_sow_direction(records)}")
+    return lines
+
+
+def _describe_sow_direction(records: list[SowMonthlyRecord]) -> str:
+    if len(records) < 2:
+        return "记录不足"
+    changes = [
+        current.sow_inventory - previous.sow_inventory
+        for previous, current in zip(records, records[1:])
+    ]
+    if all(change < 0 for change in changes):
+        return "连续下降"
+    if all(change > 0 for change in changes):
+        return "连续上升"
+    if all(change == 0 for change in changes):
+        return "持平"
+    return "混合"
 
 
 def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
@@ -78,6 +120,21 @@ def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
     else:
         for record in sow_records:
             lines.extend(_format_sow_record(record))
+
+    source_types = sorted(
+        {source_type for _, source_type in storage.get_sow_monthly_business_keys()},
+        key=lambda source_type: source_type.value,
+    )
+    if not source_types:
+        lines.extend(["", "能繁母猪历史", "- 暂无母猪历史数据"])
+    else:
+        for source_type in source_types:
+            history = storage.get_sow_monthly_history(
+                source_type=source_type,
+                limit=6,
+            )
+            lines.extend(["", f"能繁母猪历史（{source_type.value}）"])
+            lines.extend(_format_sow_history(history))
     return "\n".join(lines)
 
 

@@ -822,6 +822,7 @@ def test_known_state_reads_do_not_change_timestamps(initialized_db: Path) -> Non
     storage.get_record_counts()
     storage.get_latest_moa_weekly_record()
     storage.get_latest_sow_monthly_records_by_source()
+    storage.get_sow_monthly_history(source_type=SowSourceType.MOA_REPORTED)
 
     assert _timestamp_state(initialized_db) == before
 
@@ -971,6 +972,119 @@ def test_get_latest_sow_monthly_records_restores_null_fields(
     assert result[0].publish_date is None
     assert result[0].mom_change is None
     assert result[0].yoy_change is None
+
+
+def test_get_sow_monthly_history_is_sorted_and_isolated_by_source(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    nbs_records = [
+        replace(
+            _sow_record(),
+            month=month,
+            source_type=SowSourceType.NBS,
+            source_url=f"https://www.stats.gov.cn/{month}.htm",
+        )
+        for month in ("2026-06", "2025-12", "2026-03")
+    ]
+    reported = replace(
+        _sow_record(),
+        month="2026-05",
+        source_url="https://www.moa.gov.cn/reported.htm",
+    )
+    for record in (*nbs_records, reported):
+        storage.save_sow_monthly(record)
+
+    result = storage.get_sow_monthly_history(source_type=SowSourceType.NBS)
+
+    assert [record.month for record in result] == ["2025-12", "2026-03", "2026-06"]
+    assert all(record.source_type is SowSourceType.NBS for record in result)
+    assert reported not in result
+
+
+def test_get_sow_monthly_history_limit_selects_latest_then_returns_ascending(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    for month in ("2025-12", "2026-03", "2026-06"):
+        storage.save_sow_monthly(
+            replace(
+                _sow_record(),
+                month=month,
+                source_type=SowSourceType.NBS,
+                source_url=f"https://www.stats.gov.cn/{month}.htm",
+            )
+        )
+
+    result = storage.get_sow_monthly_history(
+        source_type=SowSourceType.NBS,
+        limit=2,
+    )
+
+    assert [record.month for record in result] == ["2026-03", "2026-06"]
+
+
+def test_get_sow_monthly_history_restores_null_fields_and_empty_source(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    record = _sow_record(publish_date=None, mom_change=None, yoy_change=None)
+    storage.save_sow_monthly(record)
+
+    assert storage.get_sow_monthly_history(
+        source_type=SowSourceType.MOA_REPORTED
+    ) == [record]
+    assert storage.get_sow_monthly_history(source_type=SowSourceType.NBS) == []
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_get_sow_monthly_history_rejects_non_positive_limit(
+    initialized_db: Path, limit: int
+) -> None:
+    with pytest.raises(ValueError, match="greater than zero"):
+        PigCycleStorage(initialized_db).get_sow_monthly_history(
+            source_type=SowSourceType.NBS,
+            limit=limit,
+        )
+
+
+@pytest.mark.parametrize("limit", [1.5, "2", True])
+def test_get_sow_monthly_history_rejects_non_integer_limit(
+    initialized_db: Path, limit: object
+) -> None:
+    with pytest.raises(TypeError, match="positive integer"):
+        PigCycleStorage(initialized_db).get_sow_monthly_history(
+            source_type=SowSourceType.NBS,
+            limit=limit,  # type: ignore[arg-type]
+        )
+
+
+def test_get_sow_monthly_history_requires_source_type_enum(
+    initialized_db: Path,
+) -> None:
+    with pytest.raises(TypeError, match="SowSourceType"):
+        PigCycleStorage(initialized_db).get_sow_monthly_history(
+            source_type="nbs",  # type: ignore[arg-type]
+        )
+
+
+def test_get_sow_monthly_history_missing_and_uninitialized_database(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing-history.sqlite3"
+    with pytest.raises(FileNotFoundError):
+        PigCycleStorage(missing).get_sow_monthly_history(
+            source_type=SowSourceType.NBS
+        )
+    assert not missing.exists()
+
+    uninitialized = tmp_path / "uninitialized-history.sqlite3"
+    with closing(sqlite3.connect(uninitialized)):
+        pass
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        PigCycleStorage(uninitialized).get_sow_monthly_history(
+            source_type=SowSourceType.NBS
+        )
 
 
 @pytest.mark.parametrize(
