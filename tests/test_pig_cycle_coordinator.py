@@ -9,13 +9,27 @@ from pathlib import Path
 import pytest
 
 import src.pig_cycle.coordinator as coordinator_module
-from src.pig_cycle.coordinator import run_moa_weekly_increment
+from src.pig_cycle.coordinator import (
+    run_moa_weekly_increment,
+    run_sow_monthly_official_url,
+)
 from src.pig_cycle.moa_weekly import MoaWeeklyRecord
-from src.pig_cycle.storage import MoaWeeklySaveStatus, PigCycleStorage
+from src.pig_cycle.sow_monthly import (
+    SowMonthlyDataError,
+    SowMonthlyRecord,
+    SowSourceType,
+)
+from src.pig_cycle.storage import (
+    MoaWeeklySaveStatus,
+    PigCycleStorage,
+    SowMonthlySaveStatus,
+)
 
 
 URL_A = "https://xmsyj.moa.gov.cn/jcyj/weekly-a.htm"
 URL_B = "https://xmsyj.moa.gov.cn/jcyj/weekly-b.htm"
+SOW_URL_A = "https://www.stats.gov.cn/sow-a.htm"
+SOW_URL_B = "https://www.stats.gov.cn/sow-b.htm"
 
 
 def _weekly_record(
@@ -33,6 +47,24 @@ def _weekly_record(
         soybean_meal_price=3.23,
         fattening_feed_price=3.36,
         derived_pig_corn_ratio=5.6,
+        source_url=source_url,
+    )
+
+
+def _sow_record(
+    *,
+    sow_inventory: float = 3780.0,
+    publish_date: date | None = date(2026, 7, 16),
+    source_type: SowSourceType = SowSourceType.NBS,
+    source_url: str = SOW_URL_A,
+) -> SowMonthlyRecord:
+    return SowMonthlyRecord(
+        month="2026-06",
+        sow_inventory=sow_inventory,
+        mom_change=-0.1,
+        yoy_change=-2.3,
+        publish_date=publish_date,
+        source_type=source_type,
         source_url=source_url,
     )
 
@@ -61,6 +93,19 @@ def _weekly_source_url(storage: PigCycleStorage) -> str:
     with closing(sqlite3.connect(storage.db_path)) as connection:
         row = connection.execute(
             "SELECT source_url FROM moa_weekly_records WHERE collection_date = '2026-07-30'"
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _sow_processed_at(storage: PigCycleStorage, source_url: str) -> str:
+    with closing(sqlite3.connect(storage.db_path)) as connection:
+        row = connection.execute(
+            """
+            SELECT processed_at FROM processed_sources
+            WHERE record_kind = 'sow_monthly' AND source_url = ?
+            """,
+            (source_url,),
         ).fetchone()
     assert row is not None
     return str(row[0])
@@ -277,4 +322,254 @@ def test_uninitialized_schema_fails_before_fetch(
 
     with pytest.raises(sqlite3.OperationalError, match="no such table"):
         run_moa_weekly_increment(storage)
+    assert called is False
+
+
+def test_sow_known_url_is_skipped_before_fetch_and_timestamp_is_unchanged(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.save_sow_monthly(_sow_record())
+    before = _sow_processed_at(storage, SOW_URL_A)
+    calls = 0
+
+    def fail_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("known URL must not be fetched")
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fail_fetch)
+    monkeypatch.setattr(
+        storage,
+        "save_sow_monthly",
+        lambda record: (_ for _ in ()).throw(AssertionError("known URL must not be saved")),
+    )
+
+    assert run_sow_monthly_official_url(storage, SOW_URL_A) is None
+    assert calls == 0
+    assert _sow_processed_at(storage, SOW_URL_A) == before
+
+
+@pytest.mark.parametrize(
+    "source_type",
+    [SowSourceType.NBS, SowSourceType.MOA_REPORTED],
+)
+def test_sow_unknown_url_is_inserted_with_source_type_unchanged(
+    storage: PigCycleStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    source_type: SowSourceType,
+) -> None:
+    url = SOW_URL_A if source_type is SowSourceType.NBS else "https://www.moa.gov.cn/sow.htm"
+    record = _sow_record(source_type=source_type, source_url=url)
+    calls: list[tuple[str, float, object]] = []
+
+    def fake_fetch(
+        requested_url: str, *, timeout: float, session: object
+    ) -> SowMonthlyRecord:
+        calls.append((requested_url, timeout, session))
+        return record
+
+    fake_session = object()
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+
+    assert run_sow_monthly_official_url(
+        storage, url, timeout=7.5, session=fake_session
+    ) == (record, SowMonthlySaveStatus.INSERTED)
+    assert calls == [(url, 7.5, fake_session)]
+    assert storage.get_sow_monthly_business_keys() == {("2026-06", source_type)}
+    assert storage.get_sow_monthly_processed_urls() == {url}
+
+
+def test_sow_same_business_key_newer_url_is_updated_and_both_urls_remain(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.save_sow_monthly(_sow_record())
+    revised = _sow_record(
+        sow_inventory=3790.0,
+        publish_date=date(2026, 7, 17),
+        source_url=SOW_URL_B,
+    )
+    calls = 0
+
+    def fake_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal calls
+        calls += 1
+        return revised
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+
+    assert run_sow_monthly_official_url(storage, SOW_URL_B) == (
+        revised,
+        SowMonthlySaveStatus.UPDATED,
+    )
+    assert calls == 1
+    assert storage.get_sow_monthly_processed_urls() == {SOW_URL_A, SOW_URL_B}
+    assert storage.get_latest_sow_monthly_records_by_source() == [revised]
+
+
+@pytest.mark.parametrize(
+    ("current", "incoming", "expected"),
+    [
+        (
+            _sow_record(),
+            _sow_record(source_url=SOW_URL_B),
+            SowMonthlySaveStatus.UNCHANGED,
+        ),
+        (
+            _sow_record(),
+            _sow_record(publish_date=date(2026, 7, 15), source_url=SOW_URL_B),
+            SowMonthlySaveStatus.OLDER_IGNORED,
+        ),
+        (
+            _sow_record(),
+            _sow_record(sow_inventory=3790.0, source_url=SOW_URL_B),
+            SowMonthlySaveStatus.CONFLICT,
+        ),
+        (
+            _sow_record(publish_date=None),
+            _sow_record(
+                sow_inventory=3790.0,
+                publish_date=None,
+                source_url=SOW_URL_B,
+            ),
+            SowMonthlySaveStatus.ORDER_UNKNOWN,
+        ),
+    ],
+)
+def test_sow_storage_statuses_are_returned_without_coordinator_reimplementation(
+    storage: PigCycleStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    current: SowMonthlyRecord,
+    incoming: SowMonthlyRecord,
+    expected: SowMonthlySaveStatus,
+) -> None:
+    storage.save_sow_monthly(current)
+    monkeypatch.setattr(
+        coordinator_module,
+        "fetch_sow_record_from_official_url",
+        lambda *args, **kwargs: incoming,
+    )
+
+    assert run_sow_monthly_official_url(storage, incoming.source_url) == (
+        incoming,
+        expected,
+    )
+
+
+def test_sow_second_run_skips_url_saved_by_first_run(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _sow_record(source_url=SOW_URL_B)
+    calls = 0
+
+    def fake_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal calls
+        calls += 1
+        return record
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+
+    assert run_sow_monthly_official_url(storage, SOW_URL_B) == (
+        record,
+        SowMonthlySaveStatus.INSERTED,
+    )
+    before = _sow_processed_at(storage, SOW_URL_B)
+    assert run_sow_monthly_official_url(storage, SOW_URL_B) is None
+    assert calls == 1
+    assert _sow_processed_at(storage, SOW_URL_B) == before
+
+
+def test_sow_fetch_error_propagates_without_retry_or_storage_changes(
+    storage: PigCycleStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = SowMonthlyDataError("parse failed")
+    calls = 0
+
+    def fail_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal calls
+        calls += 1
+        raise expected
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fail_fetch)
+
+    with pytest.raises(SowMonthlyDataError) as raised:
+        run_sow_monthly_official_url(storage, SOW_URL_A)
+
+    assert raised.value is expected
+    assert calls == 1
+    assert storage.get_sow_monthly_business_keys() == set()
+    assert storage.get_sow_monthly_processed_urls() == set()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("mapping conflict"), sqlite3.OperationalError("write failed")],
+)
+def test_sow_save_error_propagates_without_retry(
+    storage: PigCycleStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    record = _sow_record()
+    fetch_calls = 0
+    save_calls = 0
+
+    def fake_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return record
+
+    def fail_save(value: SowMonthlyRecord) -> SowMonthlySaveStatus:
+        nonlocal save_calls
+        save_calls += 1
+        raise error
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+    monkeypatch.setattr(storage, "save_sow_monthly", fail_save)
+
+    with pytest.raises(type(error)) as raised:
+        run_sow_monthly_official_url(storage, SOW_URL_A)
+
+    assert raised.value is error
+    assert fetch_calls == 1
+    assert save_calls == 1
+
+
+def test_sow_missing_database_fails_before_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "missing.sqlite3"
+    storage = PigCycleStorage(db_path)
+    called = False
+
+    def fake_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal called
+        called = True
+        return _sow_record()
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+
+    with pytest.raises(FileNotFoundError):
+        run_sow_monthly_official_url(storage, SOW_URL_A)
+    assert called is False
+    assert not db_path.exists()
+
+
+def test_sow_uninitialized_database_fails_before_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "uninitialized.sqlite3"
+    with closing(sqlite3.connect(db_path)):
+        pass
+    storage = PigCycleStorage(db_path)
+    called = False
+
+    def fake_fetch(*args: object, **kwargs: object) -> SowMonthlyRecord:
+        nonlocal called
+        called = True
+        return _sow_record()
+
+    monkeypatch.setattr(coordinator_module, "fetch_sow_record_from_official_url", fake_fetch)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        run_sow_monthly_official_url(storage, SOW_URL_A)
     assert called is False

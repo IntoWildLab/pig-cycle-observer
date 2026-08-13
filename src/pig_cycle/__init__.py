@@ -24,7 +24,7 @@ from .sow_discovery import (
     SowDiscoveryError,
     discover_latest_sow_record,
 )
-from .coordinator import run_moa_weekly_increment
+from .coordinator import run_moa_weekly_increment, run_sow_monthly_official_url
 
 __all__ = [
     "MoaWeeklyDataError",
@@ -47,4 +47,5 @@ __all__ = [
     "SowDiscoveryError",
     "discover_latest_sow_record",
     "run_moa_weekly_increment",
+    "run_sow_monthly_official_url",
 ]
