@@ -86,6 +86,93 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS moa_weekly_record_revisions (
+        revision_id INTEGER PRIMARY KEY,
+        collection_date TEXT NOT NULL,
+        publish_date TEXT NOT NULL,
+        period_label TEXT NOT NULL,
+        piglet_price REAL NOT NULL,
+        live_hog_price REAL NOT NULL,
+        corn_price REAL NOT NULL,
+        soybean_meal_price REAL,
+        fattening_feed_price REAL,
+        derived_pig_corn_ratio REAL NOT NULL,
+        source_url TEXT NOT NULL,
+        payload_fingerprint TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        save_status TEXT,
+        sets_current INTEGER NOT NULL CHECK (sets_current IN (0, 1)),
+        ingest_origin TEXT NOT NULL CHECK (
+            ingest_origin IN ('normal_ingest', 'baseline_import')
+        ),
+        UNIQUE (source_url, payload_fingerprint),
+        CHECK (
+            (
+                ingest_origin = 'baseline_import'
+                AND save_status IS NULL
+                AND sets_current = 1
+            )
+            OR
+            (
+                ingest_origin = 'normal_ingest'
+                AND save_status IS NOT NULL
+                AND (
+                    (save_status IN ('inserted', 'updated') AND sets_current = 1)
+                    OR
+                    (
+                        save_status IN ('unchanged', 'older_ignored', 'conflict')
+                        AND sets_current = 0
+                    )
+                )
+            )
+        )
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sow_monthly_record_revisions (
+        revision_id INTEGER PRIMARY KEY,
+        month TEXT NOT NULL,
+        source_type TEXT NOT NULL CHECK (
+            source_type IN ('nbs', 'moa_reported', 'moa_estimate')
+        ),
+        sow_inventory REAL NOT NULL,
+        mom_change REAL,
+        yoy_change REAL,
+        publish_date TEXT,
+        source_url TEXT NOT NULL,
+        payload_fingerprint TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        save_status TEXT,
+        sets_current INTEGER NOT NULL CHECK (sets_current IN (0, 1)),
+        ingest_origin TEXT NOT NULL CHECK (
+            ingest_origin IN ('normal_ingest', 'baseline_import')
+        ),
+        UNIQUE (source_url, payload_fingerprint),
+        CHECK (
+            (
+                ingest_origin = 'baseline_import'
+                AND save_status IS NULL
+                AND sets_current = 1
+            )
+            OR
+            (
+                ingest_origin = 'normal_ingest'
+                AND save_status IS NOT NULL
+                AND (
+                    (save_status IN ('inserted', 'updated') AND sets_current = 1)
+                    OR
+                    (
+                        save_status IN (
+                            'unchanged', 'older_ignored', 'conflict', 'order_unknown'
+                        )
+                        AND sets_current = 0
+                    )
+                )
+            )
+        )
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_moa_weekly_records_source_url
     ON moa_weekly_records (source_url)
     """,

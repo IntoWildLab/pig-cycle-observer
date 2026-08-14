@@ -16,7 +16,13 @@ from src.pig_cycle.storage import (
 )
 
 
-TABLES = {"moa_weekly_records", "sow_monthly_records", "processed_sources"}
+TABLES = {
+    "moa_weekly_records",
+    "sow_monthly_records",
+    "processed_sources",
+    "moa_weekly_record_revisions",
+    "sow_monthly_record_revisions",
+}
 
 
 def _weekly_record(
@@ -120,6 +126,100 @@ def _index_columns(db_path: Path, table: str) -> set[tuple[str, ...]]:
         }
 
 
+def _column_contract(db_path: Path, table: str) -> dict[str, tuple[str, int, int]]:
+    with closing(sqlite3.connect(db_path)) as connection:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {
+        str(row[1]): (str(row[2]), int(row[3]), int(row[5]))
+        for row in rows
+    }
+
+
+def _table_sql(db_path: Path, table: str) -> str:
+    row = _fetch_one(
+        db_path,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    )
+    return str(row["sql"])
+
+
+def _insert_moa_revision(
+    connection: sqlite3.Connection,
+    *,
+    collection_date: str = "2026-07-30",
+    publish_date: str | None = "2026-08-04",
+    source_url: str = "https://example/weekly-a",
+    fingerprint: str = "fingerprint-a",
+    save_status: str | None = "inserted",
+    sets_current: int = 1,
+    ingest_origin: str = "normal_ingest",
+    soybean_meal_price: float | None = None,
+    fattening_feed_price: float | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO moa_weekly_record_revisions (
+            collection_date, publish_date, period_label, piglet_price,
+            live_hog_price, corn_price, soybean_meal_price,
+            fattening_feed_price, derived_pig_corn_ratio, source_url,
+            payload_fingerprint, observed_at, save_status, sets_current,
+            ingest_origin
+        ) VALUES (?, ?, '7月第5周', 23.0, 14.0, 2.5, ?, ?, 5.6, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            collection_date,
+            publish_date,
+            soybean_meal_price,
+            fattening_feed_price,
+            source_url,
+            fingerprint,
+            "2026-08-15T01:00:00+00:00",
+            save_status,
+            sets_current,
+            ingest_origin,
+        ),
+    )
+
+
+def _insert_sow_revision(
+    connection: sqlite3.Connection,
+    *,
+    month: str = "2026-06",
+    source_type: str = "nbs",
+    publish_date: str | None = "2026-07-16",
+    source_url: str = "https://example/sow-a",
+    fingerprint: str = "fingerprint-a",
+    save_status: str | None = "inserted",
+    sets_current: int = 1,
+    ingest_origin: str = "normal_ingest",
+    mom_change: float | None = None,
+    yoy_change: float | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO sow_monthly_record_revisions (
+            month, source_type, sow_inventory, mom_change, yoy_change,
+            publish_date, source_url, payload_fingerprint, observed_at,
+            save_status, sets_current, ingest_origin
+        ) VALUES (?, ?, 3780.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            month,
+            source_type,
+            mom_change,
+            yoy_change,
+            publish_date,
+            source_url,
+            fingerprint,
+            "2026-08-15T01:00:00+00:00",
+            save_status,
+            sets_current,
+            ingest_origin,
+        ),
+    )
+
+
 @pytest.fixture
 def initialized_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "pig_cycle.sqlite3"
@@ -127,8 +227,263 @@ def initialized_db(tmp_path: Path) -> Path:
     return db_path
 
 
-def test_initialize_schema_creates_three_tables(initialized_db: Path) -> None:
+def test_initialize_schema_creates_current_and_revision_tables(initialized_db: Path) -> None:
     assert _table_names(initialized_db) == TABLES
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    assert _count(initialized_db, "sow_monthly_record_revisions") == 0
+
+
+def test_revision_tables_have_exact_column_contract(initialized_db: Path) -> None:
+    assert _column_contract(initialized_db, "moa_weekly_record_revisions") == {
+        "revision_id": ("INTEGER", 0, 1),
+        "collection_date": ("TEXT", 1, 0),
+        "publish_date": ("TEXT", 1, 0),
+        "period_label": ("TEXT", 1, 0),
+        "piglet_price": ("REAL", 1, 0),
+        "live_hog_price": ("REAL", 1, 0),
+        "corn_price": ("REAL", 1, 0),
+        "soybean_meal_price": ("REAL", 0, 0),
+        "fattening_feed_price": ("REAL", 0, 0),
+        "derived_pig_corn_ratio": ("REAL", 1, 0),
+        "source_url": ("TEXT", 1, 0),
+        "payload_fingerprint": ("TEXT", 1, 0),
+        "observed_at": ("TEXT", 1, 0),
+        "save_status": ("TEXT", 0, 0),
+        "sets_current": ("INTEGER", 1, 0),
+        "ingest_origin": ("TEXT", 1, 0),
+    }
+    assert _column_contract(initialized_db, "sow_monthly_record_revisions") == {
+        "revision_id": ("INTEGER", 0, 1),
+        "month": ("TEXT", 1, 0),
+        "source_type": ("TEXT", 1, 0),
+        "sow_inventory": ("REAL", 1, 0),
+        "mom_change": ("REAL", 0, 0),
+        "yoy_change": ("REAL", 0, 0),
+        "publish_date": ("TEXT", 0, 0),
+        "source_url": ("TEXT", 1, 0),
+        "payload_fingerprint": ("TEXT", 1, 0),
+        "observed_at": ("TEXT", 1, 0),
+        "save_status": ("TEXT", 0, 0),
+        "sets_current": ("INTEGER", 1, 0),
+        "ingest_origin": ("TEXT", 1, 0),
+    }
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["moa_weekly_record_revisions", "sow_monthly_record_revisions"],
+)
+def test_revision_id_is_integer_primary_key_without_autoincrement(
+    initialized_db: Path, table: str
+) -> None:
+    assert _primary_key(initialized_db, table) == ["revision_id"]
+    assert "AUTOINCREMENT" not in _table_sql(initialized_db, table).upper()
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["moa_weekly_record_revisions", "sow_monthly_record_revisions"],
+)
+def test_revision_tables_only_have_source_fingerprint_unique_index(
+    initialized_db: Path, table: str
+) -> None:
+    assert _index_columns(initialized_db, table) == {
+        ("source_url", "payload_fingerprint")
+    }
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        assert connection.execute(f"PRAGMA foreign_key_list({table})").fetchall() == []
+
+
+@pytest.mark.parametrize("kind", ["moa", "sow"])
+def test_revision_source_fingerprint_uniqueness_contract(
+    initialized_db: Path, kind: str
+) -> None:
+    insert = _insert_moa_revision if kind == "moa" else _insert_sow_revision
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        insert(connection)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(connection)
+        insert(connection, fingerprint="fingerprint-b")
+        insert(connection, source_url="https://example/source-b")
+
+
+@pytest.mark.parametrize("kind", ["moa", "sow"])
+def test_revision_tables_allow_same_business_key_and_publish_date(
+    initialized_db: Path, kind: str
+) -> None:
+    insert = _insert_moa_revision if kind == "moa" else _insert_sow_revision
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        insert(connection)
+        insert(
+            connection,
+            source_url="https://example/source-b",
+            fingerprint="fingerprint-b",
+            save_status="conflict",
+            sets_current=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "sets_current"),
+    [
+        ("inserted", 1),
+        ("updated", 1),
+        ("unchanged", 0),
+        ("older_ignored", 0),
+        ("conflict", 0),
+    ],
+)
+def test_moa_revision_accepts_valid_normal_status_combinations(
+    initialized_db: Path, status: str, sets_current: int
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(
+            connection,
+            source_url=f"https://example/{status}",
+            save_status=status,
+            sets_current=sets_current,
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "sets_current"),
+    [
+        (None, 1),
+        ("inserted", 0),
+        ("updated", 0),
+        ("unchanged", 1),
+        ("conflict", 1),
+        ("order_unknown", 0),
+    ],
+)
+def test_moa_revision_rejects_invalid_normal_status_combinations(
+    initialized_db: Path, status: str | None, sets_current: int
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_moa_revision(
+                connection,
+                save_status=status,
+                sets_current=sets_current,
+            )
+
+
+@pytest.mark.parametrize(
+    ("status", "sets_current"),
+    [
+        ("inserted", 1),
+        ("updated", 1),
+        ("unchanged", 0),
+        ("older_ignored", 0),
+        ("conflict", 0),
+        ("order_unknown", 0),
+    ],
+)
+def test_sow_revision_accepts_valid_normal_status_combinations(
+    initialized_db: Path, status: str, sets_current: int
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(
+            connection,
+            source_url=f"https://example/{status}",
+            save_status=status,
+            sets_current=sets_current,
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "sets_current"),
+    [
+        (None, 1),
+        ("inserted", 0),
+        ("updated", 0),
+        ("unchanged", 1),
+        ("conflict", 1),
+        ("order_unknown", 1),
+        ("unknown", 0),
+    ],
+)
+def test_sow_revision_rejects_invalid_normal_status_combinations(
+    initialized_db: Path, status: str | None, sets_current: int
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_sow_revision(
+                connection,
+                save_status=status,
+                sets_current=sets_current,
+            )
+
+
+@pytest.mark.parametrize("kind", ["moa", "sow"])
+def test_revision_baseline_contract(initialized_db: Path, kind: str) -> None:
+    insert = _insert_moa_revision if kind == "moa" else _insert_sow_revision
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        insert(
+            connection,
+            ingest_origin="baseline_import",
+            save_status=None,
+            sets_current=1,
+        )
+        for status, sets_current in (("inserted", 1), (None, 0)):
+            with pytest.raises(sqlite3.IntegrityError):
+                insert(
+                    connection,
+                    source_url=f"https://example/invalid-{status}-{sets_current}",
+                    ingest_origin="baseline_import",
+                    save_status=status,
+                    sets_current=sets_current,
+                )
+
+
+@pytest.mark.parametrize("kind", ["moa", "sow"])
+def test_revision_rejects_unknown_origin_and_invalid_boolean(
+    initialized_db: Path, kind: str
+) -> None:
+    insert = _insert_moa_revision if kind == "moa" else _insert_sow_revision
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(connection, ingest_origin="unknown")
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(connection, sets_current=2)
+
+
+@pytest.mark.parametrize("source_type", ["nbs", "moa_reported", "moa_estimate"])
+def test_sow_revision_source_type_and_optional_fields(
+    initialized_db: Path, source_type: str
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(
+            connection,
+            source_type=source_type,
+            publish_date=None,
+            mom_change=None,
+            yoy_change=None,
+            source_url=f"https://example/{source_type}",
+        )
+
+
+def test_sow_revision_rejects_unknown_source_type(initialized_db: Path) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_sow_revision(connection, source_type="unknown")
+
+
+def test_moa_revision_nullable_prices_and_required_publish_date(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(
+            connection,
+            soybean_meal_price=None,
+            fattening_feed_price=None,
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_moa_revision(
+                connection,
+                publish_date=None,
+                source_url="https://example/missing-date",
+            )
 
 
 def test_business_tables_have_expected_primary_keys(initialized_db: Path) -> None:
@@ -283,6 +638,46 @@ def test_initialize_schema_is_idempotent_and_preserves_data(tmp_path: Path) -> N
             """
         ).fetchone()
     assert row == ("2026-07-30", "https://example/weekly")
+
+
+def test_additive_revision_schema_preserves_existing_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "existing.sqlite3"
+    storage = PigCycleStorage(db_path)
+    current_only_statements = tuple(
+        statement
+        for statement in storage_module._SCHEMA_STATEMENTS
+        if "_record_revisions" not in statement
+    )
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_SCHEMA_STATEMENTS", current_only_statements)
+        storage.initialize_schema()
+
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO moa_weekly_records (
+                collection_date, publish_date, period_label, piglet_price,
+                live_hog_price, corn_price, derived_pig_corn_ratio,
+                source_url, created_at, updated_at
+            ) VALUES (
+                '2026-07-30', '2026-08-04', '7月第5周', 23.0,
+                14.0, 2.5, 5.6, 'https://example/weekly', 'created', 'updated'
+            )
+            """
+        )
+        connection.commit()
+
+    storage.initialize_schema()
+
+    assert _table_names(db_path) == TABLES
+    assert _fetch_one(
+        db_path,
+        "SELECT collection_date, source_url FROM moa_weekly_records",
+    )["source_url"] == "https://example/weekly"
+    assert _count(db_path, "moa_weekly_record_revisions") == 0
+    assert _count(db_path, "sow_monthly_record_revisions") == 0
 
 
 def test_save_moa_weekly_inserts_record_and_processed_source(initialized_db: Path) -> None:
