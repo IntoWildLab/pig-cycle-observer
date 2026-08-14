@@ -89,3 +89,19 @@
 **Why:** 强制分类会制造虚假确定性。保留不确定性和来源口径，比为每个观测期生成标签更符合可解释、可追溯的分析原则。
 
 **Status:** Active
+
+## 2026-08 — Trend features are a pure mechanical layer
+
+**Decision:** `src/pig_cycle/trend.py` 作为 Fact Layer 与未来 Cycle Layer 之间的独立纯计算层，只接收领域记录并返回 frozen `NumericTrendFeatures`；不访问 SQLite、HTTP 或 LLM，也不输出周期阶段、置信度、阈值或投资信号。
+
+**Why:** 机械数值特征需要可复用、透明且可独立验证，同时必须与事实存储和周期解释解耦，避免尚未校准的分析假设污染可靠数据层。
+
+**Status:** Active
+
+## 2026-08 — Whole-window direction and terminal streak are distinct
+
+**Decision:** Snapshot 的“所示记录方向”继续表示整个展示窗口全部相邻变化的符号形态；Trend 的 `latest_streak_direction` 和 consecutive count 只表示序列末端连续同方向的相邻变化次数。两者必须分别命名和解释，不能互相替换。
+
+**Why:** 一个窗口可以整体为“混合”，同时末端连续下降且首尾累计仍上涨。这些结论描述不同时间结构，强行合并会丢失信息并制造语义冲突。streak count 也不得解释为记录条数、周数或月数。
+
+**Status:** Active

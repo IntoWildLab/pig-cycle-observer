@@ -69,6 +69,10 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - `snapshot.py`
   - 从本地 SQLite 生成纯文本 V2 Data Snapshot v0。
   - 只展示已有数据，不进行周期判断或投资建议。
+- `trend.py`
+  - 位于事实层与未来周期判断层之间，使用纯函数把领域记录转换为透明、可复用的机械趋势特征。
+  - 不访问 SQLite、HTTP 或 LLM；结果使用 frozen `NumericTrendFeatures`。
+  - 当前支持 MOA 的仔猪、生猪、玉米和派生猪粮比，以及按单一 `SowSourceType` 隔离的能繁母猪存栏。
 
 对应离线测试位于：
 
@@ -126,6 +130,7 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - `processed_sources`、known-state 读取和有状态 MOA 周度日常增量闭环。
 - V2 Data Snapshot v0，可纯本地展示数据库概况和当前有效数据。
 - 已建立正式长期数据库 `data/pig_cycle.sqlite3`，并成功写入、展示首条真实 MOA 周度数据。
+- 已建立正式 Trend Feature Layer：`Fact Layer → Trend Feature Layer → future Cycle Layer`。当前可计算最新/前值、相邻及累计变化、末端连续方向、真实观测间隔和 irregular 标记，但不输出周期阶段、置信度或投资判断。
 
 尚未完成：
 
@@ -210,6 +215,10 @@ V2 不是单纯的数据采集器、数据库或猪价仪表盘。其长期目�
 具体分析方法必须允许迭代。阶段划分、时间窗口、指标权重和阈值都属于需要通过历史数据校准的候选方法；当前六阶段框架不是不可修改的金融定律。架构应保证模型被合并、拆分、重定义或概率化时，不需要重建底层采集、来源追溯和 SQLite 存储体系。
 
 分析遵循多指标、多时间尺度原则：单个时点或单个指标不能直接形成周期或投资判断，更重要的是一段时间内的方向、持续性、速度和拐点。周度和月度指标应尊重各自天然频率，不为统一时间轴制造虚假精度；不同指标之间的矛盾不应被强行抹平，因为矛盾本身可能包含领先、滞后或结构变化的信息。
+
+当前 Trend Layer 已正式落地的特征包括：`observation_count`、latest/previous、latest change/pct、window start、cumulative change/pct、末端连续上涨/下降变化次数、`latest_streak_direction`、observation keys、真实 interval units、interval unit 和 irregular interval flag。streak count 表示从序列末端向前连续同方向的**相邻变化次数**，不是记录条数、周数或月数。
+
+Snapshot 与 Trend 的方向语义必须保持区分：Snapshot 的“所示记录方向”描述整个展示窗口内全部相邻变化的符号形态；Trend 的 terminal streak 只描述序列末端向前的连续相邻变化。因此，同一序列可以同时表现为 Snapshot 的“混合”和 Trend 的末端连续下降，两者不冲突，不能直接用 terminal streak 替换 Snapshot 的 whole-window direction helper。
 
 产业周期、公司盈利和市场定价必须分层：行业改善不等于所有猪企同样受益；公司层还需考虑销售价格、完全成本、出栏量、养殖效率和业务结构。行业玉米、豆粕和饲料价格可以描述行业盈利环境，必要时可作为低置信度代理，但不能冒充公司的真实完全成本。股票价格还可能领先产业基本面，因此最终必须判断市场已提前交易了多少。
 
@@ -323,3 +332,15 @@ V2 早期获取农业农村部等政府官方网站数据时，曾尝试较广�
 - `0cf912e feat: add pig cycle data snapshot`
 
 该 commit 仅用于标记本文档最近一次系统性核对项目状态时的历史上下文，不代表未来的当前 HEAD。实时分支、提交和工作区状态必须以实际执行的 `git status`、`git log` 等命令为准。
+
+### Trend Layer 真实数据验证锚点（2026-08-14）
+
+`04fd9e3 feat: add pig cycle trend features` 已通过 256 项测试和正式 SQLite 数据 smoke test。以下数值仅记录该时点的真实验证结果，不代表未来数据库中的永久业务值：
+
+- MOA 仔猪（6 条）：latest `22.42`，latest change 约 `-0.58`（`-2.52%`），cumulative change 约 `+0.78`（`+3.60%`），terminal down count `2`。
+- MOA 生猪：latest `11.13`，latest change 约 `-0.09`（`-0.80%`），cumulative change 约 `+0.65`（`+6.20%`），terminal down count `3`。
+- MOA 派生猪粮比：latest 约 `4.506`，latest change 约 `-0.0364`，cumulative change pct 约 `+6.63%`，terminal down count `3`。
+- MOA 实际间隔为 `7/7/7/7/7` 天，irregular 为 `false`。
+- NBS 母猪 `3961 → 3904 → 3780`：latest change `-124`（约 `-3.18%`），cumulative change `-181`（约 `-4.57%`），terminal down count `2`；间隔为 `3/3` 个月，irregular 为 `false`。
+
+这些结果全部是机械趋势特征，不是猪周期阶段、趋势确认、置信度或投资判断。

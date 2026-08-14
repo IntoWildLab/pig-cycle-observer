@@ -38,6 +38,31 @@
 
 ## 3. 趋势特征候选
 
+### 已实现的 Trend Feature Layer v0
+
+当前架构已形成：
+
+```text
+Fact Layer → Trend Feature Layer → future Cycle Layer
+```
+
+`src/pig_cycle/trend.py` 是无 SQLite、无 HTTP、无 LLM、无副作用的纯计算层。它接收 `MoaWeeklyRecord` / `SowMonthlyRecord`，返回 frozen `NumericTrendFeatures`。当前支持：
+
+- MOA：`piglet_price`、`live_hog_price`、`corn_price`、`derived_pig_corn_ratio`；
+- Sow：按单一 `SowSourceType` 隔离计算 `sow_inventory`，不同来源不混合。
+
+已实现特征包括 observation count、latest/previous、最新相邻变化及百分比、窗口起点、累计变化及百分比、末端连续上涨/下降变化次数、末端方向、观测键、真实间隔单位和 irregular interval 标记。streak count 严格表示从末端向前的连续同方向**相邻变化次数**，不是记录数、周数或月数。
+
+Trend v0 只提供机械特征，不判断六阶段，不输出“去产能”“底部形成”“趋势确认”、置信度、阈值或投资信号。
+
+### Snapshot whole-window 与 Trend terminal streak
+
+Snapshot 的“所示记录方向”归纳整个当前展示窗口内全部相邻变化：全部同号时显示连续上升或连续下降，全部为零时显示持平，否则显示混合。Trend 的 `latest_streak_direction` 与连续计数只从序列末端向前统计同方向相邻变化。
+
+例如生猪序列 `10.48 → 11.35 → 11.50 → 11.45 → 11.22 → 11.13`：Snapshot whole-window direction 为“混合”，Trend terminal streak 为 `DOWN`、down count 为 `3`，同时累计变化约为 `+6.20%`。这些结果描述不同维度，可以同时成立。未来 Snapshot 即使消费 Trend Layer，也必须分别标注两种语义，不能直接用 terminal streak 替换当前 whole-window helper。
+
+### 尚待验证的候选
+
 以下窗口和特征均为候选，必须经过历史验证后才能形成稳定规则。
 
 周度指标可研究：
@@ -58,6 +83,8 @@
 - 去化或扩张速度。
 
 “当前值”只是事实。真正用于判断的是变化方向、持续性、速度、拐点和指标组合关系。周度与月度数据应保留各自天然频率，不应用插值制造并不存在的日度精度。
+
+当前继续暂缓硬编码 4/8/12 周窗口、window high/low 的解释、斜率、加速/减速、拐点、止涨/止跌、周期阶段阈值、置信度和投资信号。原因是历史长度、语义和校准仍不足，候选假设不能提前固化为正式规则。
 
 ## 4. 周期状态框架 v0.x
 
@@ -233,6 +260,8 @@
 - 后续发布的修订。
 
 不得使用后来发布或后来修订的数据美化历史判断。当前数据层已经保留 `publish_date`、`source_url` 和 processed source 等语义，未来历史分析应利用这些信息避免 look-ahead bias（前视偏差）。
+
+Trend v0 已支持按 `as_of` 对官方 `publish_date` 做最后一道过滤，从而阻止晚于判断时点发布的当前记录进入计算。但当前 storage 只保存当前有效业务版本，不能完整重建已被后续修订覆盖的旧版本。完整 point-in-time revision history 属于未来独立存储能力，不能把当前 `as_of` 过滤描述为完整历史复原。
 
 ## 10. 模型设计原则
 
