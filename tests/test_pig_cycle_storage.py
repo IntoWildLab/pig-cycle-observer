@@ -75,6 +75,14 @@ def _fetch_one(db_path: Path, query: str, parameters: tuple[object, ...] = ()) -
     return row
 
 
+def _fetch_all(
+    db_path: Path, query: str, parameters: tuple[object, ...] = ()
+) -> list[sqlite3.Row]:
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(query, parameters).fetchall()
+
+
 def _count(db_path: Path, table: str) -> int:
     with closing(sqlite3.connect(db_path)) as connection:
         row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
@@ -809,6 +817,7 @@ def test_save_moa_weekly_rejects_source_remapped_to_another_date(initialized_db:
 
     assert _count(initialized_db, "moa_weekly_records") == 1
     assert _count(initialized_db, "processed_sources") == 1
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 1
     processed = _fetch_one(initialized_db, "SELECT business_key FROM processed_sources")
     assert processed["business_key"] == first.collection_date.isoformat()
 
@@ -846,6 +855,7 @@ def test_save_moa_weekly_rolls_back_processed_source_when_business_insert_fails(
 
     assert _count(initialized_db, "moa_weekly_records") == 0
     assert _count(initialized_db, "processed_sources") == 0
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
 
 
 def test_save_sow_monthly_inserts_record_and_processed_source(initialized_db: Path) -> None:
@@ -1064,6 +1074,7 @@ def test_save_sow_monthly_rejects_source_remapping(
 
     assert _count(initialized_db, "sow_monthly_records") == 1
     assert _count(initialized_db, "processed_sources") == 1
+    assert _count(initialized_db, "sow_monthly_record_revisions") == 1
     processed = _fetch_one(initialized_db, "SELECT business_key, source_type FROM processed_sources")
     assert tuple(processed) == (first.month, first.source_type.value)
 
@@ -1098,6 +1109,363 @@ def test_save_sow_monthly_rolls_back_processed_source_when_business_insert_fails
 
     assert _count(initialized_db, "sow_monthly_records") == 0
     assert _count(initialized_db, "processed_sources") == 0
+    assert _count(initialized_db, "sow_monthly_record_revisions") == 0
+
+
+def test_moa_weekly_v1_golden_fingerprint() -> None:
+    assert storage_module._moa_weekly_payload_fingerprint(_weekly_record()) == (
+        "c07202c8795f202c9afd8be60fb2877d3c08fbcdddf3b8882facedf9740419ca"
+    )
+
+
+def test_sow_monthly_v1_golden_fingerprint() -> None:
+    assert storage_module._sow_monthly_payload_fingerprint(_sow_record()) == (
+        "0fd1734a13450eb808505ab1a6ccc515a20c8abb360ac3a897f1a21f92cadbb0"
+    )
+
+
+def test_moa_fingerprint_identity_fields() -> None:
+    record = _weekly_record()
+    fingerprint = storage_module._moa_weekly_payload_fingerprint(record)
+
+    assert storage_module._moa_weekly_payload_fingerprint(record) == fingerprint
+    assert storage_module._moa_weekly_payload_fingerprint(
+        replace(record, source_url="https://example/other")
+    ) == fingerprint
+    assert storage_module._moa_weekly_payload_fingerprint(
+        replace(record, derived_pig_corn_ratio=99.0)
+    ) == fingerprint
+    assert storage_module._moa_weekly_payload_fingerprint(
+        replace(record, piglet_price=23.1)
+    ) != fingerprint
+    assert storage_module._moa_weekly_payload_fingerprint(
+        replace(record, publish_date=date(2026, 8, 5))
+    ) != fingerprint
+    assert len(fingerprint) == 64
+    assert fingerprint == fingerprint.lower()
+
+
+def test_moa_fingerprint_optional_and_signed_zero_are_stable() -> None:
+    null_record = _weekly_record(soybean_meal_price=None, fattening_feed_price=None)
+    assert storage_module._moa_weekly_payload_fingerprint(null_record) == (
+        storage_module._moa_weekly_payload_fingerprint(replace(null_record))
+    )
+    assert storage_module._moa_weekly_payload_fingerprint(
+        replace(null_record, soybean_meal_price=-0.0)
+    ) == storage_module._moa_weekly_payload_fingerprint(
+        replace(null_record, soybean_meal_price=0.0)
+    )
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), float("-inf")])
+def test_moa_fingerprint_rejects_invalid_numeric_values(invalid: object) -> None:
+    record = replace(_weekly_record(), piglet_price=invalid)
+    error = TypeError if isinstance(invalid, bool) else ValueError
+    with pytest.raises(error):
+        storage_module._moa_weekly_payload_fingerprint(record)
+
+
+def test_sow_fingerprint_identity_fields() -> None:
+    record = _sow_record(mom_change=None, yoy_change=None, publish_date=None)
+    fingerprint = storage_module._sow_monthly_payload_fingerprint(record)
+
+    assert storage_module._sow_monthly_payload_fingerprint(
+        replace(record, source_url="https://example/other")
+    ) == fingerprint
+    assert storage_module._sow_monthly_payload_fingerprint(
+        replace(record, sow_inventory=3780)
+    ) == fingerprint
+    assert storage_module._sow_monthly_payload_fingerprint(
+        replace(record, sow_inventory=3781.0)
+    ) != fingerprint
+    assert storage_module._sow_monthly_payload_fingerprint(
+        replace(record, source_type=SowSourceType.NBS)
+    ) != fingerprint
+    assert storage_module._sow_monthly_payload_fingerprint(
+        replace(record, publish_date=date(2026, 7, 10))
+    ) != fingerprint
+    assert storage_module._sow_monthly_payload_fingerprint(record) == fingerprint
+
+
+@pytest.mark.parametrize("invalid", [False, float("nan"), float("inf"), float("-inf")])
+def test_sow_fingerprint_rejects_invalid_numeric_values(invalid: object) -> None:
+    record = replace(_sow_record(), sow_inventory=invalid)
+    error = TypeError if isinstance(invalid, bool) else ValueError
+    with pytest.raises(error):
+        storage_module._sow_monthly_payload_fingerprint(record)
+
+
+def test_save_moa_weekly_appends_inserted_revision_with_complete_payload(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: "2026-08-15T01:02:03+00:00")
+    record = _weekly_record()
+
+    assert PigCycleStorage(initialized_db).save_moa_weekly(record) is MoaWeeklySaveStatus.INSERTED
+
+    revision = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_record_revisions")
+    assert revision["collection_date"] == record.collection_date.isoformat()
+    assert revision["publish_date"] == record.publish_date.isoformat()
+    assert revision["period_label"] == record.period_label
+    assert revision["piglet_price"] == record.piglet_price
+    assert revision["live_hog_price"] == record.live_hog_price
+    assert revision["corn_price"] == record.corn_price
+    assert revision["soybean_meal_price"] == record.soybean_meal_price
+    assert revision["fattening_feed_price"] == record.fattening_feed_price
+    assert revision["derived_pig_corn_ratio"] == record.derived_pig_corn_ratio
+    assert revision["source_url"] == record.source_url
+    assert revision["payload_fingerprint"] == storage_module._moa_weekly_payload_fingerprint(record)
+    assert revision["observed_at"] == "2026-08-15T01:02:03+00:00"
+    assert revision["save_status"] == "inserted"
+    assert revision["sets_current"] == 1
+    assert revision["ingest_origin"] == "normal_ingest"
+
+
+@pytest.mark.parametrize(
+    "candidate, expected_status",
+    [
+        (
+            replace(
+                _weekly_record(),
+                publish_date=date(2026, 8, 5),
+                piglet_price=24.0,
+                source_url="https://example/weekly-updated",
+            ),
+            MoaWeeklySaveStatus.UPDATED,
+        ),
+        (
+            replace(_weekly_record(), source_url="https://example/weekly-unchanged"),
+            MoaWeeklySaveStatus.UNCHANGED,
+        ),
+        (
+            replace(
+                _weekly_record(),
+                publish_date=date(2026, 8, 3),
+                source_url="https://example/weekly-older",
+            ),
+            MoaWeeklySaveStatus.OLDER_IGNORED,
+        ),
+        (
+            replace(
+                _weekly_record(),
+                live_hog_price=15.0,
+                source_url="https://example/weekly-conflict",
+            ),
+            MoaWeeklySaveStatus.CONFLICT,
+        ),
+    ],
+    ids=["updated", "unchanged", "older", "conflict"],
+)
+def test_save_moa_weekly_appends_revision_for_each_status(
+    initialized_db: Path,
+    candidate: MoaWeeklyRecord,
+    expected_status: MoaWeeklySaveStatus,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(_weekly_record())
+
+    assert storage.save_moa_weekly(candidate) is expected_status
+
+    revisions = _fetch_all(
+        initialized_db,
+        "SELECT source_url, save_status, sets_current FROM moa_weekly_record_revisions ORDER BY revision_id",
+    )
+    assert len(revisions) == 2
+    assert revisions[0]["save_status"] == "inserted"
+    assert revisions[1]["source_url"] == candidate.source_url
+    assert revisions[1]["save_status"] == expected_status.value
+    assert revisions[1]["sets_current"] == int(expected_status is MoaWeeklySaveStatus.UPDATED)
+
+
+def test_save_sow_monthly_appends_inserted_revision_with_complete_payload(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: "2026-08-15T02:03:04+00:00")
+    record = _sow_record()
+
+    assert PigCycleStorage(initialized_db).save_sow_monthly(record) is SowMonthlySaveStatus.INSERTED
+
+    revision = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_record_revisions")
+    assert revision["month"] == record.month
+    assert revision["source_type"] == record.source_type.value
+    assert revision["sow_inventory"] == record.sow_inventory
+    assert revision["mom_change"] == record.mom_change
+    assert revision["yoy_change"] == record.yoy_change
+    assert revision["publish_date"] == record.publish_date.isoformat()
+    assert revision["source_url"] == record.source_url
+    assert revision["payload_fingerprint"] == storage_module._sow_monthly_payload_fingerprint(record)
+    assert revision["observed_at"] == "2026-08-15T02:03:04+00:00"
+    assert revision["save_status"] == "inserted"
+    assert revision["sets_current"] == 1
+    assert revision["ingest_origin"] == "normal_ingest"
+
+
+@pytest.mark.parametrize(
+    "candidate, expected_status",
+    [
+        (
+            replace(
+                _sow_record(),
+                sow_inventory=3790.0,
+                publish_date=date(2026, 7, 11),
+                source_url="https://example/sow-updated",
+            ),
+            SowMonthlySaveStatus.UPDATED,
+        ),
+        (
+            replace(_sow_record(), source_url="https://example/sow-unchanged"),
+            SowMonthlySaveStatus.UNCHANGED,
+        ),
+        (
+            replace(
+                _sow_record(),
+                publish_date=date(2026, 7, 9),
+                source_url="https://example/sow-older",
+            ),
+            SowMonthlySaveStatus.OLDER_IGNORED,
+        ),
+        (
+            replace(
+                _sow_record(),
+                sow_inventory=3790.0,
+                source_url="https://example/sow-conflict",
+            ),
+            SowMonthlySaveStatus.CONFLICT,
+        ),
+        (
+            replace(
+                _sow_record(publish_date=None),
+                sow_inventory=3790.0,
+                source_url="https://example/sow-order-unknown",
+            ),
+            SowMonthlySaveStatus.ORDER_UNKNOWN,
+        ),
+    ],
+    ids=["updated", "unchanged", "older", "conflict", "order-unknown"],
+)
+def test_save_sow_monthly_appends_revision_for_each_status(
+    initialized_db: Path,
+    candidate: SowMonthlyRecord,
+    expected_status: SowMonthlySaveStatus,
+) -> None:
+    initial = _sow_record(publish_date=None) if expected_status is SowMonthlySaveStatus.ORDER_UNKNOWN else _sow_record()
+    storage = PigCycleStorage(initialized_db)
+    storage.save_sow_monthly(initial)
+
+    assert storage.save_sow_monthly(candidate) is expected_status
+
+    revisions = _fetch_all(
+        initialized_db,
+        "SELECT source_url, save_status, sets_current FROM sow_monthly_record_revisions ORDER BY revision_id",
+    )
+    assert len(revisions) == 2
+    assert revisions[0]["save_status"] == "inserted"
+    assert revisions[1]["source_url"] == candidate.source_url
+    assert revisions[1]["save_status"] == expected_status.value
+    assert revisions[1]["sets_current"] == int(expected_status is SowMonthlySaveStatus.UPDATED)
+
+
+@pytest.mark.parametrize("kind", ["weekly", "sow"])
+def test_same_url_same_fingerprint_does_not_refresh_revision(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    times = iter(("2026-08-15T01:00:00+00:00", "2026-08-16T01:00:00+00:00"))
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: next(times))
+    storage = PigCycleStorage(initialized_db)
+    record = _weekly_record() if kind == "weekly" else _sow_record()
+    save = storage.save_moa_weekly if kind == "weekly" else storage.save_sow_monthly
+    table = "moa_weekly_record_revisions" if kind == "weekly" else "sow_monthly_record_revisions"
+
+    save(record)
+    assert save(record).value == "unchanged"
+
+    assert _count(initialized_db, table) == 1
+    revision = _fetch_one(initialized_db, f"SELECT observed_at, save_status FROM {table}")
+    assert tuple(revision) == ("2026-08-15T01:00:00+00:00", "inserted")
+
+
+def test_same_url_changed_payload_appends_revision_without_refreshing_processed_at(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = iter(("2026-08-15T01:00:00+00:00", "2026-08-16T01:00:00+00:00"))
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: next(times))
+    first = _weekly_record()
+    changed = replace(first, publish_date=date(2026, 8, 5), piglet_price=24.0)
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+
+    assert storage.save_moa_weekly(changed) is MoaWeeklySaveStatus.UPDATED
+
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 2
+    processed = _fetch_one(initialized_db, "SELECT processed_at FROM processed_sources")
+    assert processed["processed_at"] == "2026-08-15T01:00:00+00:00"
+
+
+def test_derived_ratio_only_change_does_not_create_official_revision(initialized_db: Path) -> None:
+    first = _weekly_record()
+    changed = replace(first, derived_pig_corn_ratio=5.7)
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(first)
+
+    assert storage.save_moa_weekly(changed) is MoaWeeklySaveStatus.CONFLICT
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 1
+
+
+def test_revision_insert_failure_rolls_back_current_and_processed(initialized_db: Path) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_revision_insert
+            BEFORE INSERT ON moa_weekly_record_revisions
+            BEGIN
+                SELECT RAISE(ABORT, 'forced revision failure');
+            END
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced revision failure"):
+        PigCycleStorage(initialized_db).save_moa_weekly(_weekly_record())
+
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    assert _count(initialized_db, "moa_weekly_records") == 0
+    assert _count(initialized_db, "processed_sources") == 0
+
+
+def test_processed_source_failure_leaves_no_partial_revision_or_current(initialized_db: Path) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_processed_insert
+            BEFORE INSERT ON processed_sources
+            BEGIN
+                SELECT RAISE(ABORT, 'forced processed failure');
+            END
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced processed failure"):
+        PigCycleStorage(initialized_db).save_moa_weekly(_weekly_record())
+
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    assert _count(initialized_db, "moa_weekly_records") == 0
+    assert _count(initialized_db, "processed_sources") == 0
+
+
+def test_save_without_revision_schema_rolls_back_existing_table_mutations(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite3"
+    with closing(sqlite3.connect(db_path)) as connection:
+        for statement in storage_module._SCHEMA_STATEMENTS:
+            if "_record_revisions" not in statement:
+                connection.execute(statement)
+        connection.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        PigCycleStorage(db_path).save_moa_weekly(_weekly_record())
+
+    assert _count(db_path, "moa_weekly_records") == 0
+    assert _count(db_path, "processed_sources") == 0
 
 
 def test_get_moa_weekly_processed_urls_includes_all_processed_outcomes(initialized_db: Path) -> None:

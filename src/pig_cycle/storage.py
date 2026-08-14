@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import sqlite3
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -34,6 +37,80 @@ class SowMonthlySaveStatus(str, Enum):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _canonical_float(value: object, *, field_name: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    if number == 0.0:
+        number = 0.0
+    return number.hex()
+
+
+def _optional_canonical_float(value: object | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _canonical_float(value, field_name=field_name)
+
+
+def _canonical_payload_fingerprint(payload: dict[str, object]) -> str:
+    canonical_json = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _moa_weekly_payload_fingerprint(record: MoaWeeklyRecord) -> str:
+    return _canonical_payload_fingerprint(
+        {
+            "schema": "moa_weekly.v1",
+            "collection_date": record.collection_date.isoformat(),
+            "publish_date": record.publish_date.isoformat(),
+            "period_label": record.period_label,
+            "piglet_price": _canonical_float(
+                record.piglet_price, field_name="piglet_price"
+            ),
+            "live_hog_price": _canonical_float(
+                record.live_hog_price, field_name="live_hog_price"
+            ),
+            "corn_price": _canonical_float(record.corn_price, field_name="corn_price"),
+            "soybean_meal_price": _optional_canonical_float(
+                record.soybean_meal_price, field_name="soybean_meal_price"
+            ),
+            "fattening_feed_price": _optional_canonical_float(
+                record.fattening_feed_price, field_name="fattening_feed_price"
+            ),
+        }
+    )
+
+
+def _sow_monthly_payload_fingerprint(record: SowMonthlyRecord) -> str:
+    return _canonical_payload_fingerprint(
+        {
+            "schema": "sow_monthly.v1",
+            "month": record.month,
+            "source_type": record.source_type.value,
+            "sow_inventory": _canonical_float(
+                record.sow_inventory, field_name="sow_inventory"
+            ),
+            "mom_change": _optional_canonical_float(
+                record.mom_change, field_name="mom_change"
+            ),
+            "yoy_change": _optional_canonical_float(
+                record.yoy_change, field_name="yoy_change"
+            ),
+            "publish_date": (
+                record.publish_date.isoformat() if record.publish_date is not None else None
+            ),
+        }
+    )
 
 
 _SCHEMA_STATEMENTS = (
@@ -217,6 +294,7 @@ class PigCycleStorage:
         now = _utc_now()
         collection_date = record.collection_date.isoformat()
         publish_date = record.publish_date.isoformat()
+        payload_fingerprint = _moa_weekly_payload_fingerprint(record)
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         try:
@@ -310,6 +388,38 @@ class PigCycleStorage:
             else:
                 status = MoaWeeklySaveStatus.CONFLICT
 
+            connection.execute(
+                """
+                INSERT INTO moa_weekly_record_revisions (
+                    collection_date, publish_date, period_label, piglet_price,
+                    live_hog_price, corn_price, soybean_meal_price,
+                    fattening_feed_price, derived_pig_corn_ratio, source_url,
+                    payload_fingerprint, observed_at, save_status, sets_current,
+                    ingest_origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal_ingest')
+                ON CONFLICT(source_url, payload_fingerprint) DO NOTHING
+                """,
+                (
+                    collection_date,
+                    publish_date,
+                    record.period_label,
+                    record.piglet_price,
+                    record.live_hog_price,
+                    record.corn_price,
+                    record.soybean_meal_price,
+                    record.fattening_feed_price,
+                    record.derived_pig_corn_ratio,
+                    record.source_url,
+                    payload_fingerprint,
+                    now,
+                    status.value,
+                    int(
+                        status
+                        in (MoaWeeklySaveStatus.INSERTED, MoaWeeklySaveStatus.UPDATED)
+                    ),
+                ),
+            )
+
             connection.commit()
             return status
         except BaseException:
@@ -347,6 +457,7 @@ class PigCycleStorage:
         now = _utc_now()
         source_type = record.source_type.value
         publish_date = record.publish_date.isoformat() if record.publish_date is not None else None
+        payload_fingerprint = _sow_monthly_payload_fingerprint(record)
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         try:
@@ -441,6 +552,33 @@ class PigCycleStorage:
                     status = SowMonthlySaveStatus.UNCHANGED
                 else:
                     status = SowMonthlySaveStatus.CONFLICT
+
+            connection.execute(
+                """
+                INSERT INTO sow_monthly_record_revisions (
+                    month, source_type, sow_inventory, mom_change, yoy_change,
+                    publish_date, source_url, payload_fingerprint, observed_at,
+                    save_status, sets_current, ingest_origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal_ingest')
+                ON CONFLICT(source_url, payload_fingerprint) DO NOTHING
+                """,
+                (
+                    record.month,
+                    source_type,
+                    record.sow_inventory,
+                    record.mom_change,
+                    record.yoy_change,
+                    publish_date,
+                    record.source_url,
+                    payload_fingerprint,
+                    now,
+                    status.value,
+                    int(
+                        status
+                        in (SowMonthlySaveStatus.INSERTED, SowMonthlySaveStatus.UPDATED)
+                    ),
+                ),
+            )
 
             connection.commit()
             return status
