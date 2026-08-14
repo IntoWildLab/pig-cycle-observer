@@ -161,6 +161,8 @@ def test_nbs_old_template_sow_clause_inherits_across_statistical_continuation() 
     assert record.sow_inventory == 4062.0
     assert record.publish_date == date(2024, 10, 18)
     assert record.source_type is SowSourceType.NBS
+    assert record.yoy_change == -4.2
+    assert record.mom_change == 0.6
 
 
 def test_nbs_sow_clause_does_not_inherit_across_unrelated_sentence() -> None:

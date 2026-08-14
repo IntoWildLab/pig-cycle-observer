@@ -15,6 +15,12 @@ CAPACITY_YELLOW_LOW_UPPER = 0.92
 CAPACITY_GREEN_UPPER = 1.03
 CAPACITY_YELLOW_HIGH_UPPER = 1.06
 _QUARTER_END_MONTHS = {"一": 3, "二": 6, "三": 9, "四": 12}
+_CHANGE_DIRECTIONS = r"增长|上升|增加|下降|减少|下调"
+_SOW_INVENTORY_PATTERN = re.compile(
+    r"(?:全国)?能繁母猪存栏(?:量)?"
+    r"(?:为|达到|达|下调至|上调至|降至|升至)?"
+    r"([0-9]+(?:\.[0-9]+)?)万头"
+)
 
 
 class SowMonthlyDataError(ValueError):
@@ -114,28 +120,39 @@ def _parse_month(text: str, publish_date: Optional[date]) -> str:
 
 
 def _parse_inventory(text: str) -> float:
-    match = re.search(
-        r"(?:全国)?能繁母猪存栏(?:量)?"
-        r"(?:为|达到|达|下调至|上调至|降至|升至)?"
-        r"([0-9]+(?:\.[0-9]+)?)万头",
-        text,
-    )
+    match = _SOW_INVENTORY_PATTERN.search(text)
     if not match:
         raise SowMonthlyDataError("Official text is missing sow_inventory in 10,000 head")
     return float(match.group(1))
 
 
-def _parse_change(text: str, prefix: str) -> Optional[float]:
-    match = re.search(
-        rf"{prefix}(增长|上升|增加|下降|减少|下调)"
-        r"\s*([0-9]+(?:\.[0-9]+)?)\s*%",
-        text,
+def _sow_change_scope(text: str) -> tuple[str, ...]:
+    clauses = [part for part in re.split(r"[。！？；\r\n]+", text) if part]
+    for index, clause in enumerate(clauses):
+        inventory_match = _SOW_INVENTORY_PATTERN.search(clause)
+        if inventory_match is None:
+            continue
+
+        scope = [clause[inventory_match.start():]]
+        if index + 1 < len(clauses) and re.match(r"^(?:同比|环比)", clauses[index + 1]):
+            scope.append(clauses[index + 1])
+        return tuple(scope)
+    return ()
+
+
+def _parse_change(clauses: tuple[str, ...], prefix: str) -> Optional[float]:
+    pattern = re.compile(
+        rf"{prefix}(?:(?:{_CHANGE_DIRECTIONS})"
+        r"[0-9]+(?:\.[0-9]+)?万头[，,]?)?"
+        rf"({_CHANGE_DIRECTIONS})([0-9]+(?:\.[0-9]+)?)%"
     )
-    if not match:
-        return None
-    direction, value_text = match.groups()
-    value = float(value_text)
-    return -value if direction in {"下降", "减少", "下调"} else value
+    for clause in clauses:
+        match = pattern.search(clause)
+        if match:
+            direction, value_text = match.groups()
+            value = float(value_text)
+            return -value if direction in {"下降", "减少", "下调"} else value
+    return None
 
 
 def parse_sow_monthly_record(
@@ -147,11 +164,12 @@ def parse_sow_monthly_record(
 ) -> SowMonthlyRecord:
     """Parse one caller-supplied official statement without fetching data."""
     compact_text = re.sub(r"\s+", "", text)
+    change_scope = _sow_change_scope(compact_text)
     return SowMonthlyRecord(
         month=_parse_month(compact_text, publish_date),
         sow_inventory=_parse_inventory(compact_text),
-        mom_change=_parse_change(compact_text, "环比"),
-        yoy_change=_parse_change(compact_text, "同比"),
+        mom_change=_parse_change(change_scope, "环比"),
+        yoy_change=_parse_change(change_scope, "同比"),
         publish_date=publish_date,
         source_type=_parse_source_type(source_type),
         source_url=source_url,

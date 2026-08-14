@@ -33,6 +33,87 @@ def test_parse_inventory_and_signed_monthly_and_yearly_changes() -> None:
     assert record.yoy_change == -6.2
 
 
+def test_changes_are_scoped_to_sow_clause_and_one_statistical_continuation() -> None:
+    record = _parse(
+        "三季度末，全国生猪存栏42694万头，同比下降3.5%；"
+        "环比增长2.8%。"
+        "其中，能繁母猪存栏4062万头，同比减少178万头，下降4.2%；"
+        "环比增加25万头，增长0.6%。",
+        published=date(2024, 10, 18),
+    )
+
+    assert record.yoy_change == -4.2
+    assert record.mom_change == 0.6
+
+
+def test_sow_clause_with_only_yearly_change_keeps_monthly_change_none() -> None:
+    record = _parse("5月末能繁母猪存栏4039万头，同比下降3.5%")
+
+    assert record.yoy_change == -3.5
+    assert record.mom_change is None
+
+
+def test_sow_clause_with_only_monthly_change_keeps_yearly_change_none() -> None:
+    record = _parse("5月末能繁母猪存栏4035万头，环比下降0.6%")
+
+    assert record.mom_change == -0.6
+    assert record.yoy_change is None
+
+
+def test_hog_changes_before_sow_without_local_changes_are_not_borrowed() -> None:
+    record = _parse(
+        "全国生猪存栏42694万头，同比下降3.5%；环比增长2.8%。"
+        "5月末能繁母猪存栏4062万头。"
+    )
+
+    assert record.mom_change is None
+    assert record.yoy_change is None
+
+
+def test_multiple_unrelated_changes_before_sow_are_not_borrowed() -> None:
+    record = _parse(
+        "猪肉产量同比下降1.2%，生猪出栏环比下降5.0%。"
+        "玉米价格同比增长2.0%。"
+        "5月末能繁母猪存栏4062万头。"
+    )
+
+    assert record.mom_change is None
+    assert record.yoy_change is None
+
+
+def test_change_after_unrelated_clause_is_not_borrowed() -> None:
+    record = _parse(
+        "5月末能繁母猪存栏4062万头。"
+        "市场供应总体稳定。"
+        "环比增长0.6%。"
+    )
+
+    assert record.mom_change is None
+    assert record.yoy_change is None
+
+
+def test_only_one_statistical_continuation_is_in_change_scope() -> None:
+    record = _parse(
+        "5月末能繁母猪存栏4062万头。"
+        "同比下降4.2%；"
+        "环比增长0.6%。"
+    )
+
+    assert record.yoy_change == -4.2
+    assert record.mom_change is None
+
+
+def test_other_objects_and_local_changes_are_not_borrowed() -> None:
+    record = _parse(
+        "全国生猪存栏同比下降3.5%。"
+        "山东省能繁母猪监测值环比下降0.8%。"
+        "5月末全国能繁母猪存栏4062万头。"
+    )
+
+    assert record.mom_change is None
+    assert record.yoy_change is None
+
+
 def test_missing_changes_remain_none() -> None:
     record = _parse("1月末全国能繁母猪存栏量4062万头", published=date(2026, 2, 10))
 
