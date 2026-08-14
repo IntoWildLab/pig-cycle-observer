@@ -164,6 +164,8 @@ def _insert_moa_revision(
     ingest_origin: str = "normal_ingest",
     soybean_meal_price: float | None = None,
     fattening_feed_price: float | None = None,
+    piglet_price: float = 23.0,
+    derived_pig_corn_ratio: float = 5.6,
 ) -> None:
     connection.execute(
         """
@@ -173,13 +175,15 @@ def _insert_moa_revision(
             fattening_feed_price, derived_pig_corn_ratio, source_url,
             payload_fingerprint, observed_at, save_status, sets_current,
             ingest_origin
-        ) VALUES (?, ?, '7月第5周', 23.0, 14.0, 2.5, ?, ?, 5.6, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, '7月第5周', ?, 14.0, 2.5, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             collection_date,
             publish_date,
+            piglet_price,
             soybean_meal_price,
             fattening_feed_price,
+            derived_pig_corn_ratio,
             source_url,
             fingerprint,
             "2026-08-15T01:00:00+00:00",
@@ -233,6 +237,75 @@ def initialized_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "pig_cycle.sqlite3"
     PigCycleStorage(db_path).initialize_schema()
     return db_path
+
+
+def _insert_weekly_current(
+    db_path: Path,
+    record: MoaWeeklyRecord | None = None,
+    *,
+    created_at: str = "2026-08-04T01:00:00+00:00",
+    updated_at: str = "2026-08-05T01:00:00+00:00",
+) -> MoaWeeklyRecord:
+    record = record or _weekly_record()
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO moa_weekly_records (
+                collection_date, publish_date, period_label, piglet_price,
+                live_hog_price, corn_price, soybean_meal_price,
+                fattening_feed_price, derived_pig_corn_ratio, source_url,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.collection_date.isoformat(),
+                record.publish_date.isoformat(),
+                record.period_label,
+                record.piglet_price,
+                record.live_hog_price,
+                record.corn_price,
+                record.soybean_meal_price,
+                record.fattening_feed_price,
+                record.derived_pig_corn_ratio,
+                record.source_url,
+                created_at,
+                updated_at,
+            ),
+        )
+        connection.commit()
+    return record
+
+
+def _insert_sow_current(
+    db_path: Path,
+    record: SowMonthlyRecord | None = None,
+    *,
+    created_at: str = "2026-07-10T01:00:00+00:00",
+    updated_at: str = "2026-07-11T01:00:00+00:00",
+) -> SowMonthlyRecord:
+    record = record or _sow_record()
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO sow_monthly_records (
+                month, source_type, sow_inventory, mom_change, yoy_change,
+                publish_date, source_url, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.month,
+                record.source_type.value,
+                record.sow_inventory,
+                record.mom_change,
+                record.yoy_change,
+                record.publish_date.isoformat() if record.publish_date else None,
+                record.source_url,
+                created_at,
+                updated_at,
+            ),
+        )
+        connection.commit()
+    return record
 
 
 def test_initialize_schema_creates_current_and_revision_tables(initialized_db: Path) -> None:
@@ -584,6 +657,345 @@ def test_schema_initialization_rolls_back_all_ddl_on_failure(
         PigCycleStorage(db_path).initialize_schema()
 
     assert _table_names(db_path) == set()
+
+
+def test_revision_baseline_audit_empty_database_is_complete(initialized_db: Path) -> None:
+    audit = PigCycleStorage(initialized_db).audit_revision_baseline()
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (True, True, False)
+    assert audit.weekly_current_count == audit.sow_current_count == 0
+    assert audit.warnings == audit.blockers == ()
+
+
+def test_revision_baseline_bootstrap_copies_full_weekly_and_sow_payloads(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: "2026-08-15T03:00:00+00:00")
+    weekly = _insert_weekly_current(
+        initialized_db, _weekly_record(soybean_meal_price=None, fattening_feed_price=None)
+    )
+    sow = _insert_sow_current(
+        initialized_db, _sow_record(mom_change=None, yoy_change=None, publish_date=None)
+    )
+    before = _timestamp_state(initialized_db)
+    immutable_before = {
+        table: [tuple(row) for row in _fetch_all(initialized_db, f"SELECT * FROM {table}")]
+        for table in ("moa_weekly_records", "sow_monthly_records", "processed_sources")
+    }
+
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (True, True, True)
+    assert (audit.weekly_inserted_count, audit.sow_inserted_count) == (1, 1)
+    assert _timestamp_state(initialized_db) == before
+    assert immutable_before == {
+        table: [tuple(row) for row in _fetch_all(initialized_db, f"SELECT * FROM {table}")]
+        for table in ("moa_weekly_records", "sow_monthly_records", "processed_sources")
+    }
+    weekly_revision = _fetch_one(initialized_db, "SELECT * FROM moa_weekly_record_revisions")
+    sow_revision = _fetch_one(initialized_db, "SELECT * FROM sow_monthly_record_revisions")
+    assert weekly_revision["derived_pig_corn_ratio"] == weekly.derived_pig_corn_ratio
+    assert weekly_revision["soybean_meal_price"] is None
+    assert weekly_revision["payload_fingerprint"] == storage_module._moa_weekly_payload_fingerprint(weekly)
+    assert sow_revision["mom_change"] is None and sow_revision["yoy_change"] is None
+    assert sow_revision["publish_date"] is None
+    assert sow_revision["payload_fingerprint"] == storage_module._sow_monthly_payload_fingerprint(sow)
+    assert (weekly_revision["save_status"], weekly_revision["sets_current"], weekly_revision["ingest_origin"]) == (None, 1, "baseline_import")
+
+    revision_state = [
+        tuple(row)
+        for row in _fetch_all(
+            initialized_db,
+            "SELECT observed_at, save_status, sets_current, ingest_origin FROM moa_weekly_record_revisions",
+        )
+    ]
+    second = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert (second.complete, second.applied, second.weekly_inserted_count) == (True, False, 0)
+    assert revision_state == [
+        tuple(row)
+        for row in _fetch_all(
+            initialized_db,
+            "SELECT observed_at, save_status, sets_current, ingest_origin FROM moa_weekly_record_revisions",
+        )
+    ]
+
+
+def test_revision_baseline_uses_updated_at_not_created_at_or_processed_at(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: "2026-08-15T03:00:00+00:00")
+    record = _insert_weekly_current(
+        initialized_db,
+        created_at="2026-08-01T00:00:00+00:00",
+        updated_at="2026-08-05T01:00:00+00:00",
+    )
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            "INSERT INTO processed_sources VALUES ('moa_weekly', ?, ?, NULL, ?, ?)",
+            (record.source_url, record.collection_date.isoformat(), record.publish_date.isoformat(), "2026-08-02T00:00:00+00:00"),
+        )
+        connection.commit()
+
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    revision = _fetch_one(initialized_db, "SELECT observed_at FROM moa_weekly_record_revisions")
+    assert revision["observed_at"] == "2026-08-05T01:00:00+00:00"
+    assert (audit.weekly_updated_at_evidence_count, audit.weekly_import_time_fallback_count) == (1, 0)
+
+
+def test_revision_baseline_equal_updated_and_import_times_remains_updated_at_evidence(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timestamp = "2026-08-15T03:00:00+00:00"
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: timestamp)
+    _insert_weekly_current(initialized_db, updated_at=timestamp)
+
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+
+    assert audit.weekly_updated_at_evidence_count == 1
+    assert audit.weekly_import_time_fallback_count == 0
+    assert "import_time_fallback" not in {
+        issue.reason_code for issue in audit.warnings
+    }
+    assert _fetch_one(
+        initialized_db, "SELECT observed_at FROM moa_weekly_record_revisions"
+    )["observed_at"] == timestamp
+
+
+@pytest.mark.parametrize(
+    "updated_at",
+    ["", "not-a-time", "2026-08-05T01:00:00", "2026-08-05T09:00:00+08:00", "2026-08-16T00:00:00+00:00"],
+    ids=["empty", "malformed", "naive", "non-utc", "future"],
+)
+def test_revision_baseline_invalid_updated_at_uses_one_import_time(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch, updated_at: str
+) -> None:
+    imported_at = "2026-08-15T03:00:00+00:00"
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: imported_at)
+    _insert_weekly_current(initialized_db, updated_at=updated_at)
+    _insert_weekly_current(
+        initialized_db,
+        replace(_weekly_record(), collection_date=date(2026, 8, 6), source_url="https://example/weekly-second"),
+        updated_at=updated_at,
+    )
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    observed = {row["observed_at"] for row in _fetch_all(initialized_db, "SELECT observed_at FROM moa_weekly_record_revisions")}
+    assert observed == {imported_at}
+    assert audit.weekly_import_time_fallback_count == 2
+    assert [issue.reason_code for issue in audit.warnings].count("import_time_fallback") == 2
+
+
+@pytest.mark.parametrize(
+    "processed_publish_date, processed_at, warning_code",
+    [
+        ("2026-08-03", "2026-08-04T01:00:00+00:00", "processed_publish_date_mismatch"),
+        ("2026-08-04", "bad-time", "processed_at_invalid"),
+        ("2026-08-04", "2026-08-06T01:00:00+00:00", "processed_after_current_updated_at"),
+    ],
+)
+def test_revision_baseline_processed_anomalies_only_warn(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch,
+    processed_publish_date: str, processed_at: str, warning_code: str,
+) -> None:
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: "2026-08-15T03:00:00+00:00")
+    record = _insert_weekly_current(initialized_db)
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute(
+            "INSERT INTO processed_sources VALUES ('moa_weekly', ?, ?, NULL, ?, ?)",
+            (record.source_url, record.collection_date.isoformat(), processed_publish_date, processed_at),
+        )
+        connection.commit()
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert audit.complete is True
+    assert warning_code in {issue.reason_code for issue in audit.warnings}
+    assert _fetch_one(initialized_db, "SELECT observed_at FROM moa_weekly_record_revisions")["observed_at"] == "2026-08-05T01:00:00+00:00"
+
+
+def test_revision_baseline_missing_processed_source_warns_but_is_ready(initialized_db: Path) -> None:
+    _insert_weekly_current(initialized_db)
+    audit = PigCycleStorage(initialized_db).audit_revision_baseline()
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (True, False, False)
+    assert {issue.reason_code for issue in audit.warnings} == {"processed_source_missing"}
+
+
+@pytest.mark.parametrize("kind", ["weekly-key", "weekly-type", "sow-type"])
+def test_revision_baseline_processed_mapping_conflict_blocks_all_writes(
+    initialized_db: Path, kind: str
+) -> None:
+    if kind.startswith("weekly"):
+        record = _insert_weekly_current(initialized_db)
+        values = ("moa_weekly", record.source_url, "2026-08-06" if kind == "weekly-key" else record.collection_date.isoformat(), "nbs" if kind == "weekly-type" else None, record.publish_date.isoformat(), "2026-08-04T01:00:00+00:00")
+    else:
+        record = _insert_sow_current(initialized_db)
+        values = ("sow_monthly", record.source_url, record.month, "nbs", record.publish_date.isoformat(), "2026-07-10T01:00:00+00:00")
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute("INSERT INTO processed_sources VALUES (?, ?, ?, ?, ?, ?)", values)
+        connection.commit()
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (False, False, False)
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    assert _count(initialized_db, "sow_monthly_record_revisions") == 0
+
+
+def test_revision_baseline_is_idempotent_and_accepts_existing_normal_seed(initialized_db: Path) -> None:
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(_weekly_record())
+    before = _fetch_one(initialized_db, "SELECT observed_at, save_status, sets_current, ingest_origin FROM moa_weekly_record_revisions")
+    audit = storage.bootstrap_revision_baseline()
+    after = _fetch_one(initialized_db, "SELECT observed_at, save_status, sets_current, ingest_origin FROM moa_weekly_record_revisions")
+    assert tuple(after) == tuple(before)
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (True, True, False)
+    assert audit.weekly_existing_count == 1
+
+
+def test_revision_baseline_existing_noncurrent_identity_is_blocker(initialized_db: Path) -> None:
+    record = _insert_weekly_current(initialized_db)
+    fingerprint = storage_module._moa_weekly_payload_fingerprint(record)
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(connection, source_url=record.source_url, fingerprint=fingerprint, save_status="unchanged", sets_current=0, soybean_meal_price=record.soybean_meal_price, fattening_feed_price=record.fattening_feed_price)
+        connection.commit()
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert audit.ready_to_apply is False
+    assert {issue.reason_code for issue in audit.blockers} == {"existing_revision_not_current_seed"}
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 1
+
+
+def test_revision_baseline_same_fingerprint_derived_payload_mismatch_is_blocker(initialized_db: Path) -> None:
+    record = _insert_weekly_current(initialized_db)
+    fingerprint = storage_module._moa_weekly_payload_fingerprint(record)
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(connection, source_url=record.source_url, fingerprint=fingerprint, derived_pig_corn_ratio=99.0, soybean_meal_price=record.soybean_meal_price, fattening_feed_price=record.fattening_feed_price)
+        connection.commit()
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert audit.ready_to_apply is False
+    assert "existing_revision_payload_mismatch" in {issue.reason_code for issue in audit.blockers}
+
+
+def test_revision_baseline_replay_mismatch_is_blocker(initialized_db: Path) -> None:
+    current = _insert_weekly_current(initialized_db)
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(connection, source_url="https://example/later", fingerprint="later", piglet_price=99.0)
+        connection.execute("UPDATE moa_weekly_record_revisions SET observed_at='2027-01-01T00:00:00+00:00'")
+        connection.commit()
+    audit = PigCycleStorage(initialized_db).audit_revision_baseline()
+    assert current.source_url
+    assert audit.ready_to_apply is False
+    assert "replay_current_mismatch" in {issue.reason_code for issue in audit.blockers}
+
+
+def test_revision_baseline_middle_insert_failure_rolls_back_all(initialized_db: Path) -> None:
+    _insert_weekly_current(initialized_db)
+    _insert_weekly_current(initialized_db, replace(_weekly_record(), collection_date=date(2026, 8, 6), source_url="https://example/weekly-second"))
+    before = _timestamp_state(initialized_db)
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        connection.execute("""
+            CREATE TRIGGER fail_second_baseline BEFORE INSERT ON moa_weekly_record_revisions
+            WHEN NEW.source_url='https://example/weekly-second'
+            BEGIN SELECT RAISE(ABORT, 'forced baseline failure'); END
+        """)
+        connection.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="forced baseline failure"):
+        PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    assert _timestamp_state(initialized_db) == before
+
+
+def test_revision_baseline_audit_is_read_only(initialized_db: Path) -> None:
+    _insert_weekly_current(initialized_db)
+    tables = ("moa_weekly_records", "sow_monthly_records", "processed_sources")
+    before = {table: [tuple(row) for row in _fetch_all(initialized_db, f"SELECT * FROM {table}")] for table in tables}
+    audit = PigCycleStorage(initialized_db).audit_revision_baseline()
+    assert audit.applied is False
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+    after = {table: [tuple(row) for row in _fetch_all(initialized_db, f"SELECT * FROM {table}")] for table in tables}
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "method_name", ["audit_revision_baseline", "bootstrap_revision_baseline"]
+)
+def test_revision_baseline_requires_initialized_schema(
+    tmp_path: Path, method_name: str
+) -> None:
+    db_path = tmp_path / "uninitialized-baseline.sqlite3"
+    with closing(sqlite3.connect(db_path)):
+        pass
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        getattr(PigCycleStorage(db_path), method_name)()
+
+    assert _table_names(db_path) == set()
+
+
+@pytest.mark.parametrize(
+    "method_name", ["audit_revision_baseline", "bootstrap_revision_baseline"]
+)
+def test_revision_baseline_empty_legacy_schema_still_requires_revision_tables(
+    tmp_path: Path, method_name: str
+) -> None:
+    db_path = tmp_path / f"legacy-{method_name}.sqlite3"
+    legacy_statements = tuple(
+        statement
+        for statement in storage_module._SCHEMA_STATEMENTS
+        if "_record_revisions" not in statement
+    )
+    with closing(sqlite3.connect(db_path)) as connection:
+        for statement in legacy_statements:
+            connection.execute(statement)
+        connection.commit()
+    before_tables = _table_names(db_path)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        getattr(PigCycleStorage(db_path), method_name)()
+
+    assert _table_names(db_path) == before_tables
+    assert before_tables == {
+        "moa_weekly_records",
+        "sow_monthly_records",
+        "processed_sources",
+    }
+
+
+def test_revision_baseline_incomplete_post_write_audit_rolls_back(
+    initialized_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _insert_weekly_current(initialized_db)
+    original = PigCycleStorage._build_revision_baseline_plan
+    calls = 0
+
+    def incomplete_second_plan(
+        self: PigCycleStorage,
+        connection: sqlite3.Connection,
+        *,
+        imported_at: str,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        plan = original(self, connection, imported_at=imported_at)
+        if calls == 2:
+            return replace(plan, audit=replace(plan.audit, complete=False))
+        return plan
+
+    monkeypatch.setattr(
+        PigCycleStorage, "_build_revision_baseline_plan", incomplete_second_plan
+    )
+
+    with pytest.raises(RuntimeError, match="post-write audit is incomplete"):
+        PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
+
+
+def test_revision_baseline_invalid_current_fingerprint_is_logic_blocker(
+    initialized_db: Path,
+) -> None:
+    _insert_weekly_current(
+        initialized_db, replace(_weekly_record(), piglet_price=float("inf"))
+    )
+
+    audit = PigCycleStorage(initialized_db).bootstrap_revision_baseline()
+
+    assert (audit.ready_to_apply, audit.complete, audit.applied) == (False, False, False)
+    assert {issue.reason_code for issue in audit.blockers} == {"current_record_invalid"}
+    assert _count(initialized_db, "moa_weekly_record_revisions") == 0
 
 
 def test_processed_sources_composite_primary_key_behavior(initialized_db: Path) -> None:

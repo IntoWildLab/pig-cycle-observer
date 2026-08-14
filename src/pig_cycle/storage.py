@@ -6,7 +6,8 @@ import hashlib
 import json
 import math
 import sqlite3
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -33,6 +34,54 @@ class SowMonthlySaveStatus(str, Enum):
     OLDER_IGNORED = "older_ignored"
     CONFLICT = "conflict"
     ORDER_UNKNOWN = "order_unknown"
+
+
+@dataclass(frozen=True)
+class RevisionBaselineIssue:
+    record_kind: str
+    business_key: str
+    source_type: str | None
+    source_url: str
+    reason_code: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class RevisionBaselineAudit:
+    weekly_current_count: int
+    weekly_insertable_count: int
+    weekly_inserted_count: int
+    weekly_existing_count: int
+    weekly_updated_at_evidence_count: int
+    weekly_import_time_fallback_count: int
+    sow_current_count: int
+    sow_insertable_count: int
+    sow_inserted_count: int
+    sow_existing_count: int
+    sow_updated_at_evidence_count: int
+    sow_import_time_fallback_count: int
+    warnings: tuple[RevisionBaselineIssue, ...]
+    blockers: tuple[RevisionBaselineIssue, ...]
+    ready_to_apply: bool
+    complete: bool
+    applied: bool
+    imported_at: str
+
+
+@dataclass(frozen=True)
+class _RevisionBaselineEntry:
+    record_kind: str
+    business_key: str
+    source_type: str | None
+    record: MoaWeeklyRecord | SowMonthlyRecord
+    payload_fingerprint: str
+    observed_at: str
+
+
+@dataclass(frozen=True)
+class _RevisionBaselinePlan:
+    audit: RevisionBaselineAudit
+    entries: tuple[_RevisionBaselineEntry, ...]
 
 
 def _utc_now() -> str:
@@ -288,6 +337,577 @@ class PigCycleStorage:
             raise
         finally:
             connection.close()
+
+    def audit_revision_baseline(self) -> RevisionBaselineAudit:
+        """Audit current rows against revision coverage without changing SQLite."""
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            imported_at = _utc_now()
+            plan = self._build_revision_baseline_plan(connection, imported_at=imported_at)
+            connection.rollback()
+            return plan.audit
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def bootstrap_revision_baseline(self) -> RevisionBaselineAudit:
+        """Append missing baseline revisions atomically after a fresh audit."""
+        if not self.db_path.is_file():
+            raise FileNotFoundError(self.db_path)
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            imported_at = _utc_now()
+            plan = self._build_revision_baseline_plan(connection, imported_at=imported_at)
+            if not plan.audit.ready_to_apply:
+                connection.rollback()
+                return plan.audit
+
+            weekly_inserted = 0
+            sow_inserted = 0
+            for entry in plan.entries:
+                if entry.record_kind == "moa_weekly":
+                    self._insert_moa_baseline_revision(connection, entry)
+                    weekly_inserted += 1
+                else:
+                    self._insert_sow_baseline_revision(connection, entry)
+                    sow_inserted += 1
+
+            post_plan = self._build_revision_baseline_plan(
+                connection, imported_at=imported_at
+            )
+            if not post_plan.audit.complete:
+                raise RuntimeError("Revision baseline post-write audit is incomplete")
+            connection.commit()
+            return replace(
+                post_plan.audit,
+                weekly_insertable_count=plan.audit.weekly_insertable_count,
+                weekly_inserted_count=weekly_inserted,
+                sow_insertable_count=plan.audit.sow_insertable_count,
+                sow_inserted_count=sow_inserted,
+                applied=(weekly_inserted + sow_inserted > 0),
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _build_revision_baseline_plan(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        imported_at: str,
+    ) -> _RevisionBaselinePlan:
+        connection.execute(
+            "SELECT 1 FROM moa_weekly_record_revisions LIMIT 1"
+        ).fetchone()
+        connection.execute(
+            "SELECT 1 FROM sow_monthly_record_revisions LIMIT 1"
+        ).fetchone()
+        imported_dt = self._parse_utc_timestamp(imported_at)
+        if imported_dt is None:
+            raise ValueError("imported_at must be a valid UTC timestamp")
+
+        warnings: list[RevisionBaselineIssue] = []
+        blockers: list[RevisionBaselineIssue] = []
+        entries: list[_RevisionBaselineEntry] = []
+        current_records: dict[
+            tuple[str, str, str | None], MoaWeeklyRecord | SowMonthlyRecord
+        ] = {}
+        existing_counts = {"moa_weekly": 0, "sow_monthly": 0}
+        evidence_counts = {"moa_weekly": 0, "sow_monthly": 0}
+        fallback_counts = {"moa_weekly": 0, "sow_monthly": 0}
+
+        weekly_rows = connection.execute(
+            "SELECT * FROM moa_weekly_records ORDER BY collection_date"
+        ).fetchall()
+        sow_rows = connection.execute(
+            "SELECT * FROM sow_monthly_records ORDER BY month, source_type"
+        ).fetchall()
+
+        for row in weekly_rows:
+            try:
+                record = self._moa_record_from_row(row)
+                key = ("moa_weekly", record.collection_date.isoformat(), None)
+                current_records[key] = record
+                self._plan_baseline_record(
+                    connection, record_kind="moa_weekly", business_key=key[1],
+                    source_type=None, record=record, updated_at=row["updated_at"],
+                    imported_at=imported_at, imported_dt=imported_dt,
+                    warnings=warnings, blockers=blockers, entries=entries,
+                    existing_counts=existing_counts, evidence_counts=evidence_counts,
+                    fallback_counts=fallback_counts,
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                blockers.append(self._baseline_issue(
+                    "moa_weekly", str(row["collection_date"]), None,
+                    str(row["source_url"]), "current_record_invalid",
+                    f"Current row cannot produce a valid domain fingerprint: {exc}",
+                ))
+
+        for row in sow_rows:
+            try:
+                record = self._sow_record_from_row(row)
+                key = ("sow_monthly", record.month, record.source_type.value)
+                current_records[key] = record
+                self._plan_baseline_record(
+                    connection, record_kind="sow_monthly", business_key=record.month,
+                    source_type=record.source_type.value, record=record,
+                    updated_at=row["updated_at"], imported_at=imported_at,
+                    imported_dt=imported_dt, warnings=warnings, blockers=blockers,
+                    entries=entries, existing_counts=existing_counts,
+                    evidence_counts=evidence_counts, fallback_counts=fallback_counts,
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                blockers.append(self._baseline_issue(
+                    "sow_monthly", str(row["month"]), str(row["source_type"]),
+                    str(row["source_url"]), "current_record_invalid",
+                    f"Current row cannot produce a valid domain fingerprint: {exc}",
+                ))
+
+        self._check_projected_replay(
+            connection,
+            current_records=current_records,
+            planned_entries=entries,
+            blockers=blockers,
+        )
+        ready = not blockers
+        complete = ready and not entries
+        audit = RevisionBaselineAudit(
+            weekly_current_count=len(weekly_rows),
+            weekly_insertable_count=sum(
+                entry.record_kind == "moa_weekly" for entry in entries
+            ),
+            weekly_inserted_count=0,
+            weekly_existing_count=existing_counts["moa_weekly"],
+            weekly_updated_at_evidence_count=evidence_counts["moa_weekly"],
+            weekly_import_time_fallback_count=fallback_counts["moa_weekly"],
+            sow_current_count=len(sow_rows),
+            sow_insertable_count=sum(
+                entry.record_kind == "sow_monthly" for entry in entries
+            ),
+            sow_inserted_count=0,
+            sow_existing_count=existing_counts["sow_monthly"],
+            sow_updated_at_evidence_count=evidence_counts["sow_monthly"],
+            sow_import_time_fallback_count=fallback_counts["sow_monthly"],
+            warnings=tuple(warnings),
+            blockers=tuple(blockers),
+            ready_to_apply=ready,
+            complete=complete,
+            applied=False,
+            imported_at=imported_at,
+        )
+        return _RevisionBaselinePlan(audit=audit, entries=tuple(entries))
+
+    def _plan_baseline_record(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        record_kind: str,
+        business_key: str,
+        source_type: str | None,
+        record: MoaWeeklyRecord | SowMonthlyRecord,
+        updated_at: object,
+        imported_at: str,
+        imported_dt: datetime,
+        warnings: list[RevisionBaselineIssue],
+        blockers: list[RevisionBaselineIssue],
+        entries: list[_RevisionBaselineEntry],
+        existing_counts: dict[str, int],
+        evidence_counts: dict[str, int],
+        fallback_counts: dict[str, int],
+    ) -> None:
+        source_url = record.source_url
+        fingerprint = (
+            _moa_weekly_payload_fingerprint(record)
+            if record_kind == "moa_weekly"
+            else _sow_monthly_payload_fingerprint(record)
+        )
+        observed_at, used_fallback = self._baseline_observed_at(
+            updated_at,
+            imported_at=imported_at,
+            imported_dt=imported_dt,
+            record_kind=record_kind,
+            business_key=business_key,
+            source_type=source_type,
+            source_url=source_url,
+            warnings=warnings,
+        )
+        if used_fallback:
+            fallback_counts[record_kind] += 1
+        else:
+            evidence_counts[record_kind] += 1
+
+        self._audit_processed_source(
+            connection,
+            record_kind=record_kind,
+            business_key=business_key,
+            source_type=source_type,
+            record=record,
+            current_updated_at=updated_at,
+            warnings=warnings,
+            blockers=blockers,
+        )
+
+        table = (
+            "moa_weekly_record_revisions"
+            if record_kind == "moa_weekly"
+            else "sow_monthly_record_revisions"
+        )
+        existing = connection.execute(
+            f"SELECT * FROM {table} WHERE source_url = ? AND payload_fingerprint = ?",
+            (source_url, fingerprint),
+        ).fetchone()
+        if existing is None:
+            entries.append(
+                _RevisionBaselineEntry(
+                    record_kind=record_kind,
+                    business_key=business_key,
+                    source_type=source_type,
+                    record=record,
+                    payload_fingerprint=fingerprint,
+                    observed_at=observed_at,
+                )
+            )
+            return
+
+        existing_record = (
+            self._moa_record_from_row(existing)
+            if record_kind == "moa_weekly"
+            else self._sow_record_from_row(existing)
+        )
+        if existing_record != record:
+            blockers.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    source_url,
+                    "existing_revision_payload_mismatch",
+                    "Existing revision identity does not match the full current payload",
+                )
+            )
+            return
+        if not self._valid_current_seed_metadata(existing):
+            blockers.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    source_url,
+                    "existing_revision_not_current_seed",
+                    "Existing revision cannot serve as a current-state replay seed",
+                )
+            )
+            return
+        existing_counts[record_kind] += 1
+
+    @staticmethod
+    def _parse_utc_timestamp(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    def _baseline_observed_at(
+        self,
+        updated_at: object,
+        *,
+        imported_at: str,
+        imported_dt: datetime,
+        record_kind: str,
+        business_key: str,
+        source_type: str | None,
+        source_url: str,
+        warnings: list[RevisionBaselineIssue],
+    ) -> tuple[str, bool]:
+        parsed = self._parse_utc_timestamp(updated_at)
+        if parsed is not None and parsed <= imported_dt:
+            return parsed.isoformat(), False
+        warnings.append(
+            self._baseline_issue(
+                record_kind,
+                business_key,
+                source_type,
+                source_url,
+                "import_time_fallback",
+                "Current updated_at is not usable UTC evidence; import time will be used",
+            )
+        )
+        return imported_at, True
+
+    def _audit_processed_source(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        record_kind: str,
+        business_key: str,
+        source_type: str | None,
+        record: MoaWeeklyRecord | SowMonthlyRecord,
+        current_updated_at: object,
+        warnings: list[RevisionBaselineIssue],
+        blockers: list[RevisionBaselineIssue],
+    ) -> None:
+        processed = connection.execute(
+            """
+            SELECT * FROM processed_sources
+            WHERE record_kind = ? AND source_url = ?
+            """,
+            (record_kind, record.source_url),
+        ).fetchone()
+        if processed is None:
+            warnings.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_source_missing",
+                    "Current source URL is absent from processed_sources",
+                )
+            )
+            return
+
+        if processed["business_key"] != business_key:
+            blockers.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_business_key_mismatch",
+                    "Processed source URL maps to a different business key",
+                )
+            )
+        if processed["source_type"] != source_type:
+            blockers.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_source_type_mismatch",
+                    "Processed source URL maps to a different source type",
+                )
+            )
+
+        current_publish_date = (
+            record.publish_date.isoformat() if record.publish_date is not None else None
+        )
+        if processed["publish_date"] != current_publish_date:
+            warnings.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_publish_date_mismatch",
+                    "Processed source publish_date differs from the current payload",
+                )
+            )
+
+        processed_dt = self._parse_utc_timestamp(processed["processed_at"])
+        if processed_dt is None:
+            warnings.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_at_invalid",
+                    "processed_at is not a valid UTC timestamp",
+                )
+            )
+            return
+        updated_dt = self._parse_utc_timestamp(current_updated_at)
+        if updated_dt is not None and processed_dt > updated_dt:
+            warnings.append(
+                self._baseline_issue(
+                    record_kind,
+                    business_key,
+                    source_type,
+                    record.source_url,
+                    "processed_after_current_updated_at",
+                    "processed_at is later than current updated_at",
+                )
+            )
+
+    @staticmethod
+    def _valid_current_seed_metadata(row: sqlite3.Row) -> bool:
+        if row["sets_current"] != 1:
+            return False
+        if row["ingest_origin"] == "baseline_import":
+            return row["save_status"] is None
+        return row["ingest_origin"] == "normal_ingest" and row["save_status"] in (
+            "inserted",
+            "updated",
+        )
+
+    def _check_projected_replay(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        current_records: dict[
+            tuple[str, str, str | None], MoaWeeklyRecord | SowMonthlyRecord
+        ],
+        planned_entries: list[_RevisionBaselineEntry],
+        blockers: list[RevisionBaselineIssue],
+    ) -> None:
+        planned_by_key = {
+            (entry.record_kind, entry.business_key, entry.source_type): entry
+            for entry in planned_entries
+        }
+        for key, current in current_records.items():
+            record_kind, business_key, source_type = key
+            table = (
+                "moa_weekly_record_revisions"
+                if record_kind == "moa_weekly"
+                else "sow_monthly_record_revisions"
+            )
+            key_column = "collection_date" if record_kind == "moa_weekly" else "month"
+            source_filter = "" if source_type is None else " AND source_type = ?"
+            parameters: tuple[object, ...] = (
+                (business_key,)
+                if source_type is None
+                else (business_key, source_type)
+            )
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE {key_column} = ?{source_filter} AND sets_current = 1
+                ORDER BY observed_at ASC, revision_id ASC
+                """,
+                parameters,
+            ).fetchall()
+            candidates: list[tuple[datetime, int, MoaWeeklyRecord | SowMonthlyRecord]] = []
+            for row in rows:
+                observed = self._parse_utc_timestamp(row["observed_at"])
+                if observed is None:
+                    blockers.append(
+                        self._baseline_issue(
+                            record_kind,
+                            business_key,
+                            source_type,
+                            current.source_url,
+                            "revision_observed_at_invalid",
+                            "A current-setting revision has an invalid observed_at",
+                        )
+                    )
+                    continue
+                restored = (
+                    self._moa_record_from_row(row)
+                    if record_kind == "moa_weekly"
+                    else self._sow_record_from_row(row)
+                )
+                candidates.append((observed, int(row["revision_id"]), restored))
+
+            planned = planned_by_key.get(key)
+            if planned is not None:
+                observed = self._parse_utc_timestamp(planned.observed_at)
+                assert observed is not None
+                candidates.append((observed, 2**63 - 1, planned.record))
+            if candidates and max(candidates, key=lambda item: (item[0], item[1]))[2] != current:
+                blockers.append(
+                    self._baseline_issue(
+                        record_kind,
+                        business_key,
+                        source_type,
+                        current.source_url,
+                        "replay_current_mismatch",
+                        "Final current-setting revision does not match the current table",
+                    )
+                )
+
+    @staticmethod
+    def _baseline_issue(
+        record_kind: str,
+        business_key: str,
+        source_type: str | None,
+        source_url: str,
+        reason_code: str,
+        detail: str,
+    ) -> RevisionBaselineIssue:
+        return RevisionBaselineIssue(
+            record_kind=record_kind,
+            business_key=business_key,
+            source_type=source_type,
+            source_url=source_url,
+            reason_code=reason_code,
+            detail=detail,
+        )
+
+    @staticmethod
+    def _insert_moa_baseline_revision(
+        connection: sqlite3.Connection, entry: _RevisionBaselineEntry
+    ) -> None:
+        record = entry.record
+        assert isinstance(record, MoaWeeklyRecord)
+        connection.execute(
+            """
+            INSERT INTO moa_weekly_record_revisions (
+                collection_date, publish_date, period_label, piglet_price,
+                live_hog_price, corn_price, soybean_meal_price,
+                fattening_feed_price, derived_pig_corn_ratio, source_url,
+                payload_fingerprint, observed_at, save_status, sets_current,
+                ingest_origin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, 'baseline_import')
+            """,
+            (
+                record.collection_date.isoformat(),
+                record.publish_date.isoformat(),
+                record.period_label,
+                record.piglet_price,
+                record.live_hog_price,
+                record.corn_price,
+                record.soybean_meal_price,
+                record.fattening_feed_price,
+                record.derived_pig_corn_ratio,
+                record.source_url,
+                entry.payload_fingerprint,
+                entry.observed_at,
+            ),
+        )
+
+    @staticmethod
+    def _insert_sow_baseline_revision(
+        connection: sqlite3.Connection, entry: _RevisionBaselineEntry
+    ) -> None:
+        record = entry.record
+        assert isinstance(record, SowMonthlyRecord)
+        connection.execute(
+            """
+            INSERT INTO sow_monthly_record_revisions (
+                month, source_type, sow_inventory, mom_change, yoy_change,
+                publish_date, source_url, payload_fingerprint, observed_at,
+                save_status, sets_current, ingest_origin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, 'baseline_import')
+            """,
+            (
+                record.month,
+                record.source_type.value,
+                record.sow_inventory,
+                record.mom_change,
+                record.yoy_change,
+                record.publish_date.isoformat() if record.publish_date is not None else None,
+                record.source_url,
+                entry.payload_fingerprint,
+                entry.observed_at,
+            ),
+        )
 
     def save_moa_weekly(self, record: MoaWeeklyRecord) -> MoaWeeklySaveStatus:
         """Persist one MOA weekly record and remember its source atomically."""
