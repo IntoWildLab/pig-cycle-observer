@@ -36,6 +36,26 @@ class SowMonthlySaveStatus(str, Enum):
     ORDER_UNKNOWN = "order_unknown"
 
 
+class PigCycleRevisionDataError(ValueError):
+    """A stored revision cannot be interpreted safely for historical replay."""
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        revision_id: object,
+        field: str,
+        detail: str,
+    ) -> None:
+        self.table = table
+        self.revision_id = revision_id
+        self.field = field
+        super().__init__(
+            f"Invalid revision evidence in {table} revision_id={revision_id} "
+            f"field={field}: {detail}"
+        )
+
+
 @dataclass(frozen=True)
 class RevisionBaselineIssue:
     record_kind: str
@@ -1307,6 +1327,19 @@ class PigCycleStorage:
             )
         return [self._moa_record_from_row(row) for row in rows]
 
+    def get_moa_weekly_records_as_of_system(
+        self,
+        cutoff: datetime,
+    ) -> list[MoaWeeklyRecord]:
+        """Replay MOA revisions visible to the system through ``cutoff``."""
+        rows = self._revision_rows_as_of_system(
+            table="moa_weekly_record_revisions",
+            cutoff=cutoff,
+            key_fields=("collection_date",),
+            non_current_statuses=("unchanged", "older_ignored", "conflict"),
+        )
+        return [self._moa_record_from_row(row) for row in rows]
+
     @staticmethod
     def _moa_record_from_row(row: sqlite3.Row) -> MoaWeeklyRecord:
         return MoaWeeklyRecord(
@@ -1385,6 +1418,24 @@ class PigCycleStorage:
             )
         return [self._sow_record_from_row(row) for row in rows]
 
+    def get_sow_monthly_records_as_of_system(
+        self,
+        cutoff: datetime,
+    ) -> list[SowMonthlyRecord]:
+        """Replay sow revisions visible to the system through ``cutoff``."""
+        rows = self._revision_rows_as_of_system(
+            table="sow_monthly_record_revisions",
+            cutoff=cutoff,
+            key_fields=("month", "source_type"),
+            non_current_statuses=(
+                "unchanged",
+                "older_ignored",
+                "conflict",
+                "order_unknown",
+            ),
+        )
+        return [self._sow_record_from_row(row) for row in rows]
+
     @staticmethod
     def _sow_record_from_row(row: sqlite3.Row) -> SowMonthlyRecord:
         return SowMonthlyRecord(
@@ -1407,6 +1458,98 @@ class PigCycleStorage:
             (record_kind,),
         )
         return {row["source_url"] for row in rows}
+
+    @staticmethod
+    def _normalize_system_cutoff(cutoff: datetime) -> datetime:
+        if not isinstance(cutoff, datetime):
+            raise TypeError("cutoff must be a timezone-aware datetime")
+        if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            raise ValueError("cutoff must be timezone-aware")
+        return cutoff.astimezone(timezone.utc)
+
+    def _revision_rows_as_of_system(
+        self,
+        *,
+        table: str,
+        cutoff: datetime,
+        key_fields: tuple[str, ...],
+        non_current_statuses: tuple[str, ...],
+    ) -> list[sqlite3.Row]:
+        normalized_cutoff = self._normalize_system_cutoff(cutoff)
+        rows = self._read_rows(f"SELECT * FROM {table} ORDER BY revision_id ASC")
+        effective: dict[tuple[object, ...], tuple[datetime, int, sqlite3.Row]] = {}
+
+        for row in rows:
+            revision_id = row["revision_id"]
+            observed_at = self._parse_utc_timestamp(row["observed_at"])
+            if observed_at is None:
+                raise PigCycleRevisionDataError(
+                    table=table,
+                    revision_id=revision_id,
+                    field="observed_at",
+                    detail="must be a parseable timezone-aware UTC timestamp",
+                )
+            self._validate_revision_metadata(
+                row,
+                table=table,
+                non_current_statuses=non_current_statuses,
+            )
+            if observed_at > normalized_cutoff or row["sets_current"] == 0:
+                continue
+
+            key = tuple(row[field] for field in key_fields)
+            candidate = (observed_at, int(revision_id), row)
+            current = effective.get(key)
+            if current is None or candidate[:2] > current[:2]:
+                effective[key] = candidate
+
+        return [
+            entry[2]
+            for _, entry in sorted(
+                effective.items(),
+                key=lambda item: item[0],
+            )
+        ]
+
+    @staticmethod
+    def _validate_revision_metadata(
+        row: sqlite3.Row,
+        *,
+        table: str,
+        non_current_statuses: tuple[str, ...],
+    ) -> None:
+        revision_id = row["revision_id"]
+        origin = row["ingest_origin"]
+        status = row["save_status"]
+        sets_current = row["sets_current"]
+
+        if sets_current not in (0, 1):
+            raise PigCycleRevisionDataError(
+                table=table,
+                revision_id=revision_id,
+                field="sets_current",
+                detail="must be 0 or 1",
+            )
+        if origin == "baseline_import":
+            valid = status is None and sets_current == 1
+        elif origin == "normal_ingest":
+            valid = (
+                status in ("inserted", "updated") and sets_current == 1
+            ) or (status in non_current_statuses and sets_current == 0)
+        else:
+            raise PigCycleRevisionDataError(
+                table=table,
+                revision_id=revision_id,
+                field="ingest_origin",
+                detail="is not a supported revision origin",
+            )
+        if not valid:
+            raise PigCycleRevisionDataError(
+                table=table,
+                revision_id=revision_id,
+                field="save_status/sets_current",
+                detail="combination is inconsistent with ingest_origin",
+            )
 
     def _read_rows(
         self,
