@@ -108,11 +108,11 @@
 
 ## 2026-08 — Keep current effective tables and add separate revision history
 
-**Decision:** 保留以 `collection_date` 和 `(month, source_type)` 为业务键的 current effective tables，继续服务 Snapshot、current Trend 和日常流程；未来以独立 append-only tables 保存 MOA weekly 与 sow monthly 的完整 revisions，而不把 current tables 改造成 multi-version tables。
+**Decision:** 保留以 `collection_date` 和 `(month, source_type)` 为业务键的 current effective tables，继续服务 Snapshot、current Trend 和日常流程；使用独立 append-only tables 保存 MOA weekly 与 sow monthly 的完整 revisions，而不把 current tables 改造成 multi-version tables。
 
-**Why:** 这是对现有读取和日常流程破坏最小的方案，并允许 historical as-of、calibration 和未来 backtest 的版本语义独立演进。revision 表示具体官方 payload/version，首次观察时的 save status 只描述相对于当时 current state 的处理结果，不扩展为通用 event-sourcing。`processed_sources` 继续只承担 URL 去重和请求记忆，不能替代完整历史证据。当前 revision tables 尚未实现。
+**Why:** 这是对现有读取和日常流程破坏最小的方案，并允许 historical as-of、calibration 和未来 backtest 的版本语义独立演进。revision 表示具体官方 payload/version，首次观察时的 save status 只描述相对于当时 current state 的处理结果，不扩展为通用 event-sourcing。normal save 已将 processed/current/revision evidence 原子提交；current reader 仍读取 current effective tables，尚未切换到 revision replay。
 
-**Status:** Approved design; implementation pending
+**Status:** Active; point-in-time readers pending
 
 ## 2026-08 — Point-in-time distinguishes official availability from system knowledge
 
@@ -120,4 +120,36 @@
 
 **Why:** 历史页面可能在官方发布多年后才被系统回填。只按发布日期可以研究理论可获得信息，但不能描述自动化系统当时实际知道什么。现有 Trend `as_of` 仅过滤传入 current records 的发布日期，不能恢复旧 revision。baseline import 必须保留来源标记和真实观察证据；同 URL 原地修订目前也可能因永久 URL 去重而无法自动发现。
 
-**Status:** Approved design; implementation pending
+**Status:** Active contract; readers pending
+
+## 2026-08 — Baseline exact-payload time uses current updated_at
+
+**Decision:** baseline revision 的 `observed_at` 优先使用通过校验的 `current.updated_at`；它必须可解析、timezone-aware、UTC offset 为 0 且不晚于本次 `imported_at`。不可用时回退到 baseline import time，不使用 `created_at`、`publish_date` 或 `processed_at` 猜测 exact-payload system knowledge。
+
+**Why:** `current.updated_at` 只在当前 effective payload 真正 INSERT/UPDATE 时刷新，而 `processed_at` 仅证明 URL 首次成功登记。direct save 允许同 URL、同业务键的 changed payload 后续进入状态机，因此旧 `processed_at` 不能证明后来 exact payload 当时已经存在，否则 system-knowledge replay 会产生前视偏差。
+
+**Status:** Active
+
+## 2026-08 — Processed sources are baseline provenance evidence, not payload time
+
+**Decision:** baseline preflight 使用 `processed_sources` 检查 URL、业务键、来源类型、发布日期和处理时间的 mapping/provenance consistency；mapping 矛盾可阻断，缺失或时间异常作为 warning，但 `processed_at` 不决定 baseline exact-payload `observed_at`。
+
+**Why:** `processed_sources` 不保存完整 payload 或 fingerprint，无法建立 URL 首次登记时间与 current exact payload 之间的版本等价关系。
+
+**Status:** Active
+
+## 2026-08 — Baseline completion requires replay coverage, not row counts
+
+**Decision:** baseline `complete` 必须逐 current business key 验证同 source URL、同 production fingerprint、完整 payload、合法 `sets_current` seed，并按 `observed_at ASC, revision_id ASC` replay 后与 current state 一致；revision/current 数量相等不能证明完成。
+
+**Why:** 同一业务键可存在多个 revision，MOA fingerprint 又刻意排除本地派生的 `derived_pig_corn_ratio`。只有 full-payload replay invariant 才能证明 future point-in-time reader 拥有可靠起点。
+
+**Status:** Active
+
+## 2026-08 — Production revision activation requires an audited baseline gate
+
+**Decision:** 正式库启用 revision-aware writes 前，必须停止 writer、备份并验证数据库、显式初始化 revision schema、执行只读 preflight、人工审阅问题与 fallback、在单个事务中 bootstrap、完成 post-write audit 和第二次幂等 audit；只有逐 current coverage 完整后才能解除 gate。
+
+**Why:** revision 能力已在代码中实现，但正式库尚未写入 baseline。先写入新的 current update 会让既有 current state 缺少可靠 replay seed；单事务和双重审计可避免部分迁移或把“可写”误当成“已完成”。
+
+**Status:** Active gate; production baseline pending

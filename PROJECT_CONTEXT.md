@@ -61,8 +61,8 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
   - 单次最多 5 次请求、2 篇候选。
   - 不自动翻页，不做全站扫描。
 - `storage.py`
-  - 使用独立 SQLite 保存周度价格、月度母猪数据和已处理来源。
-  - 提供原子写入、修订判断和纯本地 known-state 读取。
+  - 使用独立 SQLite 保存周度价格、月度母猪数据、已处理来源和 append-only revisions。
+  - 提供原子 current/revision 写入、修订判断、纯本地 known-state 读取，以及 revision baseline 审计和引导写入。
 - `coordinator.py`
   - 将本地 processed URL 记忆接入 MOA 周度日常增量流程。
   - 保持获取层和存储层职责分离，不增加 Step 1B 请求预算。
@@ -112,6 +112,9 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 | `801c773` | 新增本地 known-state 读取 |
 | `3690541` | 新增有状态 MOA 周度增量协调器 |
 | `0cf912e` | 新增 V2 Data Snapshot v0 |
+| `a79efaf` | 新增猪周期 revision schema v0 |
+| `03c65dd` | 原子持久化猪周期 revisions |
+| `e31c2a0` | 新增 revision baseline 审计与 bootstrap |
 
 真实官网 smoke test 已覆盖 MOA 周报、MOA 母猪数据和 NBS 季度母猪数据的关键文本语义。
 
@@ -132,15 +135,16 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 已建立正式长期数据库 `data/pig_cycle.sqlite3`，并成功写入、展示首条真实 MOA 周度数据。
 - 已建立正式 Trend Feature Layer：`Fact Layer → Trend Feature Layer → future Cycle Layer`。当前可计算最新/前值、相邻及累计变化、末端连续方向、真实观测间隔和 irregular 标记，但不输出周期阶段、置信度或投资判断。
 - 当前历史深度已完成一次工程审计：MOA 为 12 条连续周度观测（2026-05-21 至 2026-08-06，全部相邻 7 天），NBS 为 8 个季度末锚点（2024-09 至 2026-06，全部相邻 3 个月）。这些数据足以验证存储和机械趋势链路，但不足以直接宣布周期规律或投资结论。
+- 已实现独立 append-only revision schema、normal revision persistence、canonical fingerprint v1、只读 baseline preflight audit 和单事务 baseline bootstrap。current tables 仍是日常 Snapshot/Trend 的有效状态来源；revision tables 尚未接管 current reader。
 
 尚未完成：
 
 - 周度价格与月度产能的统一时间序列和数据质量状态。
-- append-only revision history、完整 point-in-time reader，以及 official-availability / system-knowledge 两种 as-of 语义。
+- 正式库 revision baseline migration，以及完整 point-in-time reader 的 official-availability / system-knowledge 两种 as-of 语义。
 - 猪周期阶段模型、V2A 评分或投资信号。
 - 与 V1 主 CLI、Web、报告、邮件或 daily pipeline 的集成。
 
-Step 1C 的第一阶段已经完成。下一个合理方向是建设统一时间序列、数据质量检查和可历史校准的分析方法，同时继续保持 V2 与 V1 解耦；在分析语义稳定后，再让产业数据与 V1 股票 / ETF 能力汇合。
+Step 1C 的第一阶段已经完成。当前下一步是先对正式库执行受控 baseline migration 与审计；baseline complete 并解除 production gate 后，下一技术阶段才是 Point-in-Time Reader。historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
 
 ### Step 1C 为什么出现
 
@@ -167,13 +171,15 @@ Step 1C 计划包含：
 
 `known_urls` / `known_dates` 不只是调用便利参数，而是网络安全机制：它们让程序在发起请求前就知道“这个 URL 已访问过”“这个日期的数据已拥有”，从而跳过不必要的官方网络请求。因此，Step 1C 是“有状态、有记忆的安全数据获取”，不是与 Step 1B 无关的独立存储功能。
 
-### Current effective storage 与 Planned revision history
+### Current effective storage、Revision history 与 Baseline
 
-**Current：** 当前 `moa_weekly_records` 以 `collection_date` 为业务唯一键，`sow_monthly_records` 以 `(month, source_type)` 为业务唯一键，只保存当前 effective payload，继续服务 current Snapshot、current Trend 和日常流程。发生 `updated` 时旧 payload 会被覆盖；`conflict`、`older_ignored` 和 `order_unknown` 的完整 payload 目前也不会长期保存。`processed_sources` 只负责成功处理 URL 的永久记忆、请求前去重和基本来源映射，不是 revision history。
+**Current effective storage：** `moa_weekly_records` 以 `collection_date` 为业务唯一键，`sow_monthly_records` 以 `(month, source_type)` 为业务唯一键，只保存当前 effective payload，并继续服务 current Snapshot、current Trend 和日常流程。`processed_sources` 负责成功处理 URL 的永久记忆、请求前去重和来源映射，不是 revision history。
 
 当前 Trend 的 `as_of` 只对调用方传入的 current records 按 `publish_date` 过滤。它能阻止 `publish_date > cutoff` 的当前可见记录进入计算，但不能恢复被覆盖的旧版本、重建历史时点的 effective state，或判断系统当时是否已经抓到该版本。因此，当前 `as_of` 不是完整 point-in-time database。
 
-**Planned / Next architecture：** 保留上述 current effective tables，未来独立增加 append-only 的 MOA weekly 与 sow monthly revision history。每个成功解析的明确官方版本计划保存业务键、完整 payload、`source_url`、`publish_date`、首次成功观察时间 `observed_at`、稳定 `payload_fingerprint`、当次 save decision/status 和 provenance（如 `normal_ingest`、`baseline_import`）。旧 revision 不因后续更新而覆盖。概念上的内部标识为 `revision_id`，版本幂等方向为 `UNIQUE(source_url, payload_fingerprint)`；fingerprint 的精确规范化规则将在 schema 实现前另行确定。
+**Revision history 已实现：** `moa_weekly_record_revisions` 与 `sow_monthly_record_revisions` 独立保存 append-only revision evidence。normal ingest 中，`processed_sources`、current decision 和 revision evidence 在同一事务中原子提交；`ingest_origin=normal_ingest`，`inserted/updated` 的 `sets_current=1`，`unchanged/older_ignored/conflict/order_unknown` 的 `sets_current=0`。同一 `(source_url, payload_fingerprint)` 通过 UNIQUE identity 幂等，重复 revision 不刷新 `observed_at`、`save_status`、`sets_current` 或 origin。
+
+Canonical fingerprint v1 已冻结：MOA 使用 `schema=moa_weekly.v1` 及 `collection_date`、`publish_date`、`period_label`、仔猪/生猪/玉米/豆粕/育肥猪饲料价格；明确排除本地派生的 `derived_pig_corn_ratio`、`source_url` 和 revision metadata。Sow 使用 `schema=sow_monthly.v1` 及 `month`、`source_type`、`sow_inventory`、`mom_change`、`yoy_change`、`publish_date`。两者均使用 canonical JSON → UTF-8 → SHA-256 lowercase hex；数值必须 finite、拒绝 bool、将 `-0.0` 规范成 `+0.0`，并使用 `float.hex()`；golden digest tests 已冻结该契约。revision row 仍保存完整 payload，因此 MOA 的同 fingerprint 不代表 `derived_pig_corn_ratio` 必然相同，baseline existing-revision audit 必须继续逐字段比较完整 payload。
 
 revision 表示一个具体官方 payload/version；save status 表示该版本首次被系统观察时相对于当时 current state 的处理结果。v0 不建设通用 event-sourcing。未来 system-knowledge 查询需要依据 revision append order、`observed_at`、稳定 revision id 和保存判定，按历史观察顺序确定当时状态，而不能只筛选时间后随意取最新版。
 
@@ -185,13 +191,23 @@ Point-in-time 必须区分三类时间：
 
 未来 reader 必须分别支持 official-availability as-of 与 system-knowledge as-of。历史页面可能早已发布但直到多年后才由系统回填，两种语义不能混用；不得用 `publish_date` 冒充 `observed_at`，也不得用迁移时间冒充 `publish_date`。
 
-`older_ignored`、`conflict`、`order_unknown` 和来自新 URL 的 `unchanged` 版本未来都应保留完整 revision，但不得因此静默改变 current effective row。conflict 不得在历史查询中任意选择；发布日期缺失时也不得使用本地处理时间猜测官方先后。
+`older_ignored`、`conflict`、`order_unknown` 和来自新 URL 的 `unchanged` 版本现在均可保留完整 revision，但不得因此静默改变 current effective row。conflict 不得在未来历史查询中任意选择；发布日期缺失时也不得使用本地处理时间猜测官方先后。
 
-当前还有一个明确 detection boundary：`processed_sources` 会永久跳过已成功处理的 URL，所以官方若原地修改同一 URL，系统不会自动发现。未来可评估人工或低频、受控的 revalidation 与 payload fingerprint，但不得以高频轮询、无限重试或大规模重复抓取解决。
+当前还有一个明确 detection boundary：Coordinator 会永久跳过已成功处理的 URL，所以官方若原地修改同一 URL，系统不会自动发现。调用方若直接再次调用 `save_*`，同 URL、同业务键但不同 payload/fingerprint 仍会进入状态机并可能 append 新 revision；这不是自动 revalidation。未来可评估人工或低频、受控的 revalidation，但不得以高频轮询、无限重试或大规模重复抓取解决。
 
-现有 MOA 12 条和 NBS 8 条 current rows 未来可作为 baseline revisions 导入，并标注 `baseline_import`。`observed_at` 只能使用能够严格对应当前 source version 的可靠 `processed_at` 证据；无法证明时使用 migration/import time，绝不能伪造为官方发布日期。当前无法恢复此前未保存的被覆盖或忽略 payload，这一历史缺口必须保留说明。
+**Baseline contract：** baseline revision 使用 `ingest_origin=baseline_import`、`save_status=NULL`、`sets_current=1`，表示 revision 能力启用前仍保留在 current table 的 effective payload 被作为未来 replay 的已知起始 seed，并不声称这是该版本历史上第一次出现。`observed_at` 优先使用可信的 `current.updated_at`：它表示当前 exact effective payload 最后一次真正 INSERT/UPDATE 进入 current table 的系统 UTC 时间；`unchanged`、`older_ignored`、`conflict` 和 `order_unknown` 均不刷新它。只有 `updated_at` 可解析、timezone-aware、UTC offset 为 0 且不晚于本次 `imported_at` 时才可采用，否则使用 `imported_at` 并记录 `import_time_fallback`。不得使用 `created_at`、`publish_date`、`processed_at` 或其它 URL 时间猜测 exact-payload system knowledge。
 
-推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。append-only revision persistence、两类时间语义、point-in-time reader、冲突处理、baseline provenance 和 look-ahead 回归测试完成前，不进入正式 historical calibration、lead-lag、阈值研究或 backtest；Cycle Layer 继续暂停。
+`processed_sources` 在 baseline preflight 中只作为 source mapping / provenance consistency evidence：检查 `record_kind`、`source_url`、`business_key`、`source_type`、`publish_date` 和 `processed_at`。URL 映射到不同业务键、Sow 来源类型冲突或 Weekly `source_type` 非 NULL 属于 blocker；processed row 缺失、发布日期不一致、时间异常或 `processed_at > current.updated_at` 属于 warning/audit evidence。`processed_at` 只证明 URL 首次成功登记；same URL later changed payload 时它会早于 current payload，因此不能单独决定 baseline `observed_at`。
+
+`PigCycleStorage.audit_revision_baseline()` 使用 read-only SQLite URI，不自动初始化 schema；数据库缺失时抛 `FileNotFoundError`，revision schema 缺失时保留 `sqlite3.OperationalError`，且不写数据库。`PigCycleStorage.bootstrap_revision_baseline()` 不自动初始化 schema，使用 `BEGIN IMMEDIATE`，在事务中以单个 `imported_at` 重建 fresh plan；blocker 存在时 zero writes，否则 append 全部缺失 baseline revisions，保持 current 和 `processed_sources` 不变，并在同一事务执行 post-write audit。只有 `complete=true` 才提交，任意 SQL 或 post-audit 失败均 rollback。
+
+结果语义严格区分：`ready_to_apply` 表示 preflight 无 blocker，且每个 current row 都有合法 existing coverage 或明确可插入方案；`complete` 表示数据库当前实际已满足每个 current row 的合法 revision replay seed coverage；`applied` 表示本次 bootstrap 实际成功提交了至少一条 baseline revision。典型首次 preflight 为 `true/false/false`，成功 bootstrap 为 `true/true/true`，再次 audit 为 `true/true/false`。
+
+`BASELINE COMPLETE` 不能通过 revision row count 与 current row count 相等来判断。必须逐 current business key 验证同 `source_url`、同 production fingerprint、完整 stored payload 逐字段一致、`sets_current=1`；existing normal revision 仅在 `save_status` 为 `inserted/updated` 且 `sets_current=1` 时可作为 seed。按 `observed_at ASC, revision_id ASC` replay 后，最终 sets-current revision 必须与 current table 一致，且不存在 blocker；baseline 不得修改 current 或 `processed_sources`。当前无法恢复 revision 能力启用前未保存的被覆盖或忽略 payload，这一历史缺口继续保留。
+
+**Production activation gate 仍关闭：** 正式 `data/pig_cycle.sqlite3` 尚未执行 baseline migration；当前审计预期为 MOA current 12、Sow current 8、`processed_sources` 20，但这些数量不得硬编码进生产逻辑。在 baseline complete 前，不得使用 revision-aware save path 让既有 current 发生新 update。正式启用顺序是：停止 writer → 备份并验证正式 SQLite → 显式 `initialize_schema()` → read-only baseline preflight → 人工审阅 counts/blockers/warnings/fallback → 单事务 bootstrap → post-write audit → second idempotent audit → 确认 12/12 与 8/8 coverage → 解除 gate。
+
+推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。正式 baseline migration 与 audit 是当前下一阶段；完成后才进入 Point-in-Time Reader，分别实现 system-knowledge as-of 和 official-availability as-of。current reader 目前尚未切换到 revision replay；point-in-time reader 完成前，不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
 
 ### V2 阶段关系与最终目标
 
