@@ -420,7 +420,50 @@ class PigCycleStorage:
         )
         if not rows:
             return None
-        row = rows[0]
+        return self._moa_record_from_row(rows[0])
+
+    def get_moa_weekly_history(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[MoaWeeklyRecord]:
+        """Return current MOA weekly records in ascending collection-date order."""
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+            raise TypeError("limit must be a positive integer or None")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be greater than zero")
+
+        columns = """
+            collection_date, publish_date, period_label, piglet_price,
+            live_hog_price, corn_price, soybean_meal_price,
+            fattening_feed_price, derived_pig_corn_ratio, source_url
+        """
+        if limit is None:
+            rows = self._read_rows(
+                f"""
+                SELECT {columns}
+                FROM moa_weekly_records
+                ORDER BY collection_date ASC
+                """
+            )
+        else:
+            rows = self._read_rows(
+                f"""
+                SELECT {columns}
+                FROM (
+                    SELECT {columns}
+                    FROM moa_weekly_records
+                    ORDER BY collection_date DESC
+                    LIMIT ?
+                )
+                ORDER BY collection_date ASC
+                """,
+                (limit,),
+            )
+        return [self._moa_record_from_row(row) for row in rows]
+
+    @staticmethod
+    def _moa_record_from_row(row: sqlite3.Row) -> MoaWeeklyRecord:
         return MoaWeeklyRecord(
             collection_date=date.fromisoformat(row["collection_date"]),
             publish_date=date.fromisoformat(row["publish_date"]),

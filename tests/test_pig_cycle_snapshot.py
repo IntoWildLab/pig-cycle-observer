@@ -364,3 +364,121 @@ def test_sow_history_direction_is_a_mechanical_description(
     assert f"所示记录方向：{expected}" in text
     for forbidden in ("产能去化期", "底部形成期", "买入", "卖出", "投资建议"):
         assert forbidden not in text
+
+
+def test_empty_and_single_moa_weekly_history(storage: PigCycleStorage) -> None:
+    assert "MOA 周度历史（最近 6 条）\n- 暂无周度历史数据" in build_pig_cycle_snapshot(storage)
+
+    record = _weekly_record()
+    storage.save_moa_weekly(record)
+    text = build_pig_cycle_snapshot(storage)
+    history = text.split("MOA 周度历史（最近 6 条）", 1)[1].split(
+        "能繁母猪月度最新数据（按来源）", 1
+    )[0]
+    assert "较上一条记录" not in history
+    assert "仔猪所示记录方向：记录不足" in history
+    assert "生猪所示记录方向：记录不足" in history
+    assert "猪粮比所示记录方向：记录不足" in history
+    assert record.source_url not in history
+    assert record.source_url in text.split("最新 MOA 周度", 1)[1].split(
+        "MOA 周度历史（最近 6 条）", 1
+    )[0]
+
+
+def test_moa_weekly_history_displays_mechanical_changes_without_urls(
+    storage: PigCycleStorage,
+) -> None:
+    first = replace(
+        _weekly_record(),
+        collection_date=date(2026, 7, 2),
+        publish_date=date(2026, 7, 7),
+        piglet_price=21.64,
+        live_hog_price=10.48,
+        derived_pig_corn_ratio=4.23,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/first.htm",
+    )
+    second = replace(
+        first,
+        collection_date=date(2026, 7, 9),
+        publish_date=date(2026, 7, 14),
+        piglet_price=22.43,
+        live_hog_price=11.35,
+        derived_pig_corn_ratio=4.58,
+        soybean_meal_price=None,
+        fattening_feed_price=None,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/second.htm",
+    )
+    storage.save_moa_weekly(second)
+    storage.save_moa_weekly(first)
+
+    text = build_pig_cycle_snapshot(storage)
+    history = text.split("MOA 周度历史（最近 6 条）", 1)[1].split(
+        "能繁母猪月度最新数据（按来源）", 1
+    )[0]
+    assert history.index("2026-07-02") < history.index("2026-07-09")
+    assert "较上一条记录：+0.79 元/公斤，+3.65%" in history
+    assert "较上一条记录：+0.87 元/公斤，+8.30%" in history
+    assert "较上一条记录：+0.35，+8.27%" in history
+    assert "发布日期：2026-07-14" in history
+    assert "豆粕：暂无" in history
+    assert "育肥猪配合饲料：暂无" in history
+    assert first.source_url not in history and second.source_url not in history
+    assert "环比" not in history
+
+
+def test_moa_weekly_history_zero_previous_value_avoids_division(
+    storage: PigCycleStorage,
+) -> None:
+    first = replace(
+        _weekly_record(),
+        collection_date=date(2026, 7, 2),
+        piglet_price=0.0,
+        live_hog_price=0.0,
+        derived_pig_corn_ratio=0.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/zero.htm",
+    )
+    second = replace(
+        first,
+        collection_date=date(2026, 7, 9),
+        piglet_price=1.0,
+        live_hog_price=2.0,
+        derived_pig_corn_ratio=3.0,
+        source_url="https://xmsyj.moa.gov.cn/jcyj/nonzero.htm",
+    )
+    storage.save_moa_weekly(first)
+    storage.save_moa_weekly(second)
+    history = build_pig_cycle_snapshot(storage).split("MOA 周度历史（最近 6 条）", 1)[1]
+    assert "较上一条记录：+1.00 元/公斤，暂无" in history
+    assert "较上一条记录：+2.00 元/公斤，暂无" in history
+    assert "较上一条记录：+3.00，暂无" in history
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([1.0, 2.0, 3.0], "连续上升"),
+        ([3.0, 2.0, 1.0], "连续下降"),
+        ([2.0, 2.0, 2.0], "持平"),
+        ([1.0, 3.0, 2.0], "混合"),
+    ],
+)
+def test_moa_weekly_history_direction_is_mechanical(
+    storage: PigCycleStorage, values: list[float], expected: str
+) -> None:
+    for index, value in enumerate(values):
+        storage.save_moa_weekly(
+            replace(
+                _weekly_record(),
+                collection_date=date(2026, 7, 2 + index * 7),
+                piglet_price=value,
+                live_hog_price=value,
+                derived_pig_corn_ratio=value,
+                source_url=f"https://xmsyj.moa.gov.cn/jcyj/{index}.htm",
+            )
+        )
+    text = build_pig_cycle_snapshot(storage)
+    assert f"仔猪所示记录方向：{expected}" in text
+    assert f"生猪所示记录方向：{expected}" in text
+    assert f"猪粮比所示记录方向：{expected}" in text
+    for forbidden in ("猪周期阶段", "价格见底", "拐点确认", "趋势确认", "景气改善", "投资建议"):
+        assert forbidden not in text

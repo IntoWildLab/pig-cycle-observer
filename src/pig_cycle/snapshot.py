@@ -6,6 +6,7 @@ import argparse
 from datetime import date
 from typing import Sequence
 
+from .moa_weekly import MoaWeeklyRecord
 from .sow_monthly import SowMonthlyRecord, SowSourceType
 from .storage import PigCycleStorage
 
@@ -76,12 +77,89 @@ def _describe_sow_direction(records: list[SowMonthlyRecord]) -> str:
     return "混合"
 
 
+def _format_adjacent_change(current: float, previous: float, unit: str = "") -> str:
+    absolute_change = current - previous
+    percentage = (
+        "暂无"
+        if previous == 0
+        else f"{absolute_change / previous * 100:+.2f}%"
+    )
+    suffix = f" {unit}" if unit else ""
+    return f"较上一条记录：{absolute_change:+.2f}{suffix}，{percentage}"
+
+
+def _describe_numeric_direction(values: list[float]) -> str:
+    if len(values) < 2:
+        return "记录不足"
+    changes = [current - previous for previous, current in zip(values, values[1:])]
+    if all(change > 0 for change in changes):
+        return "连续上升"
+    if all(change < 0 for change in changes):
+        return "连续下降"
+    if all(change == 0 for change in changes):
+        return "持平"
+    return "混合"
+
+
+def _format_moa_weekly_history(records: list[MoaWeeklyRecord]) -> list[str]:
+    lines: list[str] = []
+    for index, record in enumerate(records):
+        lines.extend(
+            [
+                f"- {record.collection_date.isoformat()}（{record.period_label}）",
+                f"  - 仔猪：{_format_price(record.piglet_price)}",
+            ]
+        )
+        if index > 0:
+            lines.append(
+                "    - "
+                + _format_adjacent_change(
+                    record.piglet_price, records[index - 1].piglet_price, "元/公斤"
+                )
+            )
+        lines.append(f"  - 生猪：{_format_price(record.live_hog_price)}")
+        if index > 0:
+            lines.append(
+                "    - "
+                + _format_adjacent_change(
+                    record.live_hog_price, records[index - 1].live_hog_price, "元/公斤"
+                )
+            )
+        lines.append(f"  - 派生猪粮比：{record.derived_pig_corn_ratio:.2f}")
+        if index > 0:
+            lines.append(
+                "    - "
+                + _format_adjacent_change(
+                    record.derived_pig_corn_ratio,
+                    records[index - 1].derived_pig_corn_ratio,
+                )
+            )
+        lines.extend(
+            [
+                f"  - 玉米：{_format_price(record.corn_price)}",
+                f"  - 豆粕：{_format_price(record.soybean_meal_price)}",
+                f"  - 育肥猪配合饲料：{_format_price(record.fattening_feed_price)}",
+                f"  - 发布日期：{record.publish_date.isoformat()}",
+            ]
+        )
+    lines.extend(
+        [
+            f"仔猪所示记录方向：{_describe_numeric_direction([r.piglet_price for r in records])}",
+            f"生猪所示记录方向：{_describe_numeric_direction([r.live_hog_price for r in records])}",
+            "猪粮比所示记录方向："
+            + _describe_numeric_direction([r.derived_pig_corn_ratio for r in records]),
+        ]
+    )
+    return lines
+
+
 def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
     """Build a read-only Chinese snapshot from the local SQLite database."""
     counts = storage.get_record_counts()
     weekly_urls = storage.get_moa_weekly_processed_urls()
     sow_urls = storage.get_sow_monthly_processed_urls()
     weekly = storage.get_latest_moa_weekly_record()
+    weekly_history = storage.get_moa_weekly_history(limit=6)
     sow_records = storage.get_latest_sow_monthly_records_by_source()
 
     lines = [
@@ -113,6 +191,12 @@ def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
                 f"- 来源：{weekly.source_url}",
             ]
         )
+
+    lines.extend(["", "MOA 周度历史（最近 6 条）"])
+    if not weekly_history:
+        lines.append("- 暂无周度历史数据")
+    else:
+        lines.extend(_format_moa_weekly_history(weekly_history))
 
     lines.extend(["", "能繁母猪月度最新数据（按来源）"])
     if not sow_records:

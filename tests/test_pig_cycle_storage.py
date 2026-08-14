@@ -908,6 +908,93 @@ def test_get_latest_moa_weekly_record_restores_null_optional_prices(
     assert result.fattening_feed_price is None
 
 
+def test_get_moa_weekly_history_is_sorted_and_restores_complete_records(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    records = [
+        replace(
+            _weekly_record(),
+            collection_date=collection_date,
+            publish_date=publish_date,
+            soybean_meal_price=None if index == 1 else 3.23,
+            fattening_feed_price=None if index == 1 else 3.36,
+            source_url=f"https://xmsyj.moa.gov.cn/jcyj/{index}.htm",
+        )
+        for index, (collection_date, publish_date) in enumerate(
+            (
+                (date(2026, 7, 16), date(2026, 7, 21)),
+                (date(2026, 7, 2), date(2026, 7, 7)),
+                (date(2026, 7, 9), date(2026, 7, 14)),
+            )
+        )
+    ]
+    for record in records:
+        storage.save_moa_weekly(record)
+
+    result = storage.get_moa_weekly_history()
+
+    assert result == [records[1], records[2], records[0]]
+    assert all(isinstance(record, MoaWeeklyRecord) for record in result)
+    assert result[0].soybean_meal_price is None
+    assert result[0].fattening_feed_price is None
+
+
+def test_get_moa_weekly_history_limit_selects_latest_then_returns_ascending(
+    initialized_db: Path,
+) -> None:
+    storage = PigCycleStorage(initialized_db)
+    for index, collection_date in enumerate(
+        (date(2026, 7, 2), date(2026, 7, 9), date(2026, 7, 16))
+    ):
+        storage.save_moa_weekly(
+            replace(
+                _weekly_record(),
+                collection_date=collection_date,
+                source_url=f"https://xmsyj.moa.gov.cn/jcyj/{index}.htm",
+            )
+        )
+
+    result = storage.get_moa_weekly_history(limit=2)
+
+    assert [record.collection_date for record in result] == [
+        date(2026, 7, 9),
+        date(2026, 7, 16),
+    ]
+
+
+def test_get_moa_weekly_history_empty_and_invalid_limits(initialized_db: Path) -> None:
+    storage = PigCycleStorage(initialized_db)
+    assert storage.get_moa_weekly_history() == []
+    for limit in (0, -1):
+        with pytest.raises(ValueError, match="greater than zero"):
+            storage.get_moa_weekly_history(limit=limit)
+    for limit in (1.5, "2", True):
+        with pytest.raises(TypeError, match="positive integer"):
+            storage.get_moa_weekly_history(limit=limit)  # type: ignore[arg-type]
+
+
+def test_get_moa_weekly_history_missing_uninitialized_and_read_only(
+    tmp_path: Path, initialized_db: Path
+) -> None:
+    missing = tmp_path / "missing-moa-history.sqlite3"
+    with pytest.raises(FileNotFoundError):
+        PigCycleStorage(missing).get_moa_weekly_history()
+    assert not missing.exists()
+
+    uninitialized = tmp_path / "uninitialized-moa-history.sqlite3"
+    with closing(sqlite3.connect(uninitialized)):
+        pass
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        PigCycleStorage(uninitialized).get_moa_weekly_history()
+
+    storage = PigCycleStorage(initialized_db)
+    storage.save_moa_weekly(_weekly_record())
+    before = _timestamp_state(initialized_db)
+    storage.get_moa_weekly_history()
+    assert _timestamp_state(initialized_db) == before
+
+
 def test_get_latest_sow_monthly_records_selects_latest_per_source(
     initialized_db: Path,
 ) -> None:
