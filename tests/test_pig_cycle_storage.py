@@ -2795,3 +2795,249 @@ def test_system_as_of_reader_does_not_modify_database_state(initialized_db: Path
         for table in TABLES
     }
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "collection_date", "valid"),
+    [
+        ("2026-08-15T07:00:00+00:00", "2026-08-15", True),
+        ("2026-08-15T15:30:00+00:00", "2026-08-16", False),
+        ("2026-08-15T16:30:00+00:00", "2026-08-16", True),
+    ],
+    ids=["same-local-date", "before-china-midnight", "after-china-midnight"],
+)
+def test_system_as_of_validates_moa_business_time_in_china_timezone(
+    initialized_db: Path,
+    observed_at: str,
+    collection_date: str,
+    valid: bool,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(
+            connection,
+            observed_at=observed_at,
+            collection_date=collection_date,
+        )
+        connection.commit()
+    storage = PigCycleStorage(initialized_db)
+
+    if valid:
+        records = storage.get_moa_weekly_records_as_of_system(
+            datetime(2026, 8, 17, tzinfo=timezone.utc)
+        )
+        assert records[0].collection_date == date.fromisoformat(collection_date)
+    else:
+        with pytest.raises(PigCycleRevisionDataError) as error:
+            storage.get_moa_weekly_records_as_of_system(
+                datetime(2026, 8, 17, tzinfo=timezone.utc)
+            )
+        assert error.value.table == "moa_weekly_record_revisions"
+        assert error.value.revision_id == 1
+        assert error.value.field == "collection_date"
+
+
+def test_system_as_of_validates_future_moa_business_time_before_visibility(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(
+            connection,
+            collection_date="2026-08-16",
+            observed_at="2026-08-15T15:30:00+00:00",
+        )
+        connection.commit()
+
+    with pytest.raises(PigCycleRevisionDataError, match="collection_date"):
+        PigCycleStorage(initialized_db).get_moa_weekly_records_as_of_system(
+            datetime(2020, 1, 1, tzinfo=timezone.utc)
+        )
+
+
+def test_system_as_of_applies_business_time_rule_to_baseline_revision(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(
+            connection,
+            collection_date="2026-08-16",
+            observed_at="2026-08-15T15:30:00+00:00",
+            ingest_origin="baseline_import",
+            save_status=None,
+        )
+        connection.commit()
+
+    with pytest.raises(PigCycleRevisionDataError, match="collection_date"):
+        PigCycleStorage(initialized_db).get_moa_weekly_records_as_of_system(
+            datetime(2026, 8, 17, tzinfo=timezone.utc)
+        )
+
+
+def test_system_as_of_rejects_malformed_moa_business_date(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_moa_revision(connection, collection_date="not-a-date")
+        connection.commit()
+
+    with pytest.raises(PigCycleRevisionDataError) as error:
+        PigCycleStorage(initialized_db).get_moa_weekly_records_as_of_system(
+            datetime(2026, 8, 17, tzinfo=timezone.utc)
+        )
+    assert error.value.field == "collection_date"
+
+
+@pytest.mark.parametrize("source_type", ["nbs", "moa_reported", "moa_estimate"])
+@pytest.mark.parametrize(
+    ("month", "observed_at", "valid"),
+    [
+        ("2026-07", "2026-08-15T01:00:00+00:00", True),
+        ("2026-08", "2026-08-15T01:00:00+00:00", False),
+        ("2026-08", "2026-08-30T16:00:00+00:00", True),
+    ],
+    ids=["previous-month", "incomplete-month", "month-end"],
+)
+def test_system_as_of_validates_completed_sow_period_for_all_sources(
+    initialized_db: Path,
+    source_type: str,
+    month: str,
+    observed_at: str,
+    valid: bool,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(
+            connection,
+            month=month,
+            source_type=source_type,
+            observed_at=observed_at,
+        )
+        connection.commit()
+    storage = PigCycleStorage(initialized_db)
+
+    if valid:
+        assert len(
+            storage.get_sow_monthly_records_as_of_system(
+                datetime(2026, 9, 2, tzinfo=timezone.utc)
+            )
+        ) == 1
+    else:
+        with pytest.raises(PigCycleRevisionDataError) as error:
+            storage.get_sow_monthly_records_as_of_system(
+                datetime(2026, 9, 2, tzinfo=timezone.utc)
+            )
+        assert error.value.field == "month"
+
+
+@pytest.mark.parametrize(
+    ("month", "observed_at"),
+    [
+        ("2025-12", "2025-12-31T16:00:00+00:00"),
+        ("2028-02", "2028-02-28T16:00:00+00:00"),
+    ],
+    ids=["year-boundary", "leap-year"],
+)
+def test_system_as_of_handles_sow_month_end_calendar_boundaries(
+    initialized_db: Path,
+    month: str,
+    observed_at: str,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(connection, month=month, observed_at=observed_at)
+        connection.commit()
+
+    records = PigCycleStorage(initialized_db).get_sow_monthly_records_as_of_system(
+        datetime(2029, 1, 1, tzinfo=timezone.utc)
+    )
+    assert records[0].month == month
+
+
+@pytest.mark.parametrize("month", ["2026-13", "invalid"])
+def test_system_as_of_rejects_malformed_sow_month(
+    initialized_db: Path,
+    month: str,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(connection, month=month)
+        connection.commit()
+
+    with pytest.raises(PigCycleRevisionDataError) as error:
+        PigCycleStorage(initialized_db).get_sow_monthly_records_as_of_system(
+            datetime(2026, 8, 17, tzinfo=timezone.utc)
+        )
+    assert error.value.field == "month"
+
+
+def test_system_as_of_validates_future_sow_period_before_visibility(
+    initialized_db: Path,
+) -> None:
+    with closing(sqlite3.connect(initialized_db)) as connection:
+        _insert_sow_revision(
+            connection,
+            month="2026-08",
+            observed_at="2026-08-15T01:00:00+00:00",
+        )
+        connection.commit()
+
+    with pytest.raises(PigCycleRevisionDataError, match="month"):
+        PigCycleStorage(initialized_db).get_sow_monthly_records_as_of_system(
+            datetime(2020, 1, 1, tzinfo=timezone.utc)
+        )
+
+
+def test_save_moa_weekly_rejects_future_business_date_without_mutation(
+    initialized_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        storage_module, "_utc_now", lambda: "2026-08-15T15:30:00+00:00"
+    )
+
+    with pytest.raises(ValueError, match="collection_date business time"):
+        PigCycleStorage(initialized_db).save_moa_weekly(
+            _weekly_record(collection_date=date(2026, 8, 16))
+        )
+
+    assert all(_count(initialized_db, table) == 0 for table in TABLES)
+
+
+def test_save_moa_weekly_uses_same_observation_instant_at_china_boundary(
+    initialized_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = "2026-08-15T16:30:00+00:00"
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: observed_at)
+
+    status = PigCycleStorage(initialized_db).save_moa_weekly(
+        _weekly_record(collection_date=date(2026, 8, 16))
+    )
+
+    assert status is MoaWeeklySaveStatus.INSERTED
+    revision = _fetch_one(initialized_db, "SELECT observed_at FROM moa_weekly_record_revisions")
+    assert revision["observed_at"] == observed_at
+
+
+def test_save_sow_monthly_rejects_incomplete_period_without_mutation(
+    initialized_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        storage_module, "_utc_now", lambda: "2026-08-15T01:00:00+00:00"
+    )
+
+    with pytest.raises(ValueError, match="month business time"):
+        PigCycleStorage(initialized_db).save_sow_monthly(_sow_record(month="2026-08"))
+
+    assert all(_count(initialized_db, table) == 0 for table in TABLES)
+
+
+def test_save_sow_monthly_accepts_period_on_china_month_end(
+    initialized_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = "2026-08-30T16:00:00+00:00"
+    monkeypatch.setattr(storage_module, "_utc_now", lambda: observed_at)
+
+    status = PigCycleStorage(initialized_db).save_sow_monthly(_sow_record(month="2026-08"))
+
+    assert status is SowMonthlySaveStatus.INSERTED
+    revision = _fetch_one(initialized_db, "SELECT observed_at FROM sow_monthly_record_revisions")
+    assert revision["observed_at"] == observed_at

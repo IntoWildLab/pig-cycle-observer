@@ -15,6 +15,9 @@ from .moa_weekly import MoaWeeklyRecord
 from .sow_monthly import SowMonthlyRecord, SowSourceType
 
 
+_CHINA_BUSINESS_TIMEZONE = timezone(timedelta(hours=8))
+
+
 class MoaWeeklySaveStatus(str, Enum):
     """Outcome of persisting one successfully parsed MOA weekly record."""
 
@@ -106,6 +109,51 @@ class _RevisionBaselinePlan:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_collection_date(value: object) -> date:
+    if not isinstance(value, str):
+        raise ValueError("must be an ISO YYYY-MM-DD date")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("must be an ISO YYYY-MM-DD date") from error
+    if parsed.isoformat() != value:
+        raise ValueError("must be an ISO YYYY-MM-DD date")
+    return parsed
+
+
+def _parse_month_end(value: object) -> date:
+    if not isinstance(value, str) or len(value) != 7 or value[4] != "-":
+        raise ValueError("must be an ISO YYYY-MM month")
+    try:
+        year = int(value[:4])
+        month = int(value[5:])
+        first_of_month = date(year, month, 1)
+    except (TypeError, ValueError) as error:
+        raise ValueError("must be an ISO YYYY-MM month") from error
+    if f"{year:04d}-{month:02d}" != value:
+        raise ValueError("must be an ISO YYYY-MM month")
+    if month == 12:
+        first_of_next_month = date(year + 1, 1, 1)
+    else:
+        first_of_next_month = date(year, month + 1, 1)
+    return first_of_next_month - timedelta(days=1)
+
+
+def _require_business_time_not_future(
+    business_date: date,
+    *,
+    observed_at: datetime,
+    field_name: str,
+) -> None:
+    observed_local_date = observed_at.astimezone(_CHINA_BUSINESS_TIMEZONE).date()
+    if business_date > observed_local_date:
+        raise ValueError(
+            f"{field_name} business time {business_date.isoformat()} is later than "
+            f"the revision observation date {observed_local_date.isoformat()} "
+            "in China business time"
+        )
 
 
 def _canonical_float(value: object, *, field_name: str) -> str:
@@ -933,6 +981,14 @@ class PigCycleStorage:
         """Persist one MOA weekly record and remember its source atomically."""
         now = _utc_now()
         collection_date = record.collection_date.isoformat()
+        observed_at = self._parse_utc_timestamp(now)
+        if observed_at is None:
+            raise ValueError("current observation time must be a timezone-aware UTC timestamp")
+        _require_business_time_not_future(
+            _parse_collection_date(collection_date),
+            observed_at=observed_at,
+            field_name="collection_date",
+        )
         publish_date = record.publish_date.isoformat()
         payload_fingerprint = _moa_weekly_payload_fingerprint(record)
         connection = sqlite3.connect(self.db_path)
@@ -1095,6 +1151,14 @@ class PigCycleStorage:
     def save_sow_monthly(self, record: SowMonthlyRecord) -> SowMonthlySaveStatus:
         """Persist one monthly sow record and remember its source atomically."""
         now = _utc_now()
+        observed_at = self._parse_utc_timestamp(now)
+        if observed_at is None:
+            raise ValueError("current observation time must be a timezone-aware UTC timestamp")
+        _require_business_time_not_future(
+            _parse_month_end(record.month),
+            observed_at=observed_at,
+            field_name="month",
+        )
         source_type = record.source_type.value
         publish_date = record.publish_date.isoformat() if record.publish_date is not None else None
         payload_fingerprint = _sow_monthly_payload_fingerprint(record)
@@ -1494,6 +1558,11 @@ class PigCycleStorage:
                 table=table,
                 non_current_statuses=non_current_statuses,
             )
+            self._validate_revision_business_time(
+                row,
+                table=table,
+                observed_at=observed_at,
+            )
             if observed_at > normalized_cutoff or row["sets_current"] == 0:
                 continue
 
@@ -1510,6 +1579,38 @@ class PigCycleStorage:
                 key=lambda item: item[0],
             )
         ]
+
+    @staticmethod
+    def _validate_revision_business_time(
+        row: sqlite3.Row,
+        *,
+        table: str,
+        observed_at: datetime,
+    ) -> None:
+        revision_id = row["revision_id"]
+        if table == "moa_weekly_record_revisions":
+            field = "collection_date"
+            parser = _parse_collection_date
+        elif table == "sow_monthly_record_revisions":
+            field = "month"
+            parser = _parse_month_end
+        else:  # pragma: no cover - internal callers use the two revision tables.
+            raise ValueError(f"Unsupported revision table: {table}")
+
+        try:
+            business_date = parser(row[field])
+            _require_business_time_not_future(
+                business_date,
+                observed_at=observed_at,
+                field_name=field,
+            )
+        except ValueError as error:
+            raise PigCycleRevisionDataError(
+                table=table,
+                revision_id=revision_id,
+                field=field,
+                detail=str(error),
+            ) from error
 
     @staticmethod
     def _validate_revision_metadata(
