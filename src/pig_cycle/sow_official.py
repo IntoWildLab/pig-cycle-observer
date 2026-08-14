@@ -187,8 +187,10 @@ def _require_national_sow_content(text: str) -> None:
     compact = re.sub(r"[\t\f\v ]+", "", text)
     if "能繁母猪" not in compact:
         raise SowOfficialFetchError("Official source does not contain sow inventory content")
-    locality_pattern = re.compile(
-        rf"(?:{'|'.join(_LOCALITY_NAMES)}|[\u4e00-\u9fff]{{2,12}}(?:省|市|县|自治区|自治州)).{{0,8}}能繁母猪"
+    locality_context = rf"(?:{'|'.join(_LOCALITY_NAMES)}|[\u4e00-\u9fff]{{2,12}}(?:省|市|县|自治区|自治州))"
+    locality_pattern = re.compile(rf"{locality_context}.{{0,8}}能繁母猪")
+    statistical_continuation_pattern = re.compile(
+        r"^(?:环比|同比)(?:增加|增长|上升|上调|减少|下降|下调|持平)"
     )
     sentences = [part.strip() for part in re.split(r"[。！？；\r\n]+", compact) if part.strip()]
     sow_sentences = [sentence for sentence in sentences if "能繁母猪" in sentence]
@@ -208,6 +210,16 @@ def _require_national_sow_content(text: str) -> None:
             re.search(r"全国(?:的)?生猪存栏", previous_sentence)
             or re.search(r"全国(?:的)?生猪存栏.*其中", inherited_clause)
         )
+        if not inherits_national_context and "其中" in inherited_clause and index >= 2:
+            preceding_sentence = sentences[index - 2]
+            is_statistical_continuation = (
+                statistical_continuation_pattern.search(previous_sentence)
+                and not re.search(locality_context, previous_sentence)
+            )
+            inherits_national_context = bool(
+                is_statistical_continuation
+                and re.search(r"全国(?:的)?生猪存栏", preceding_sentence)
+            )
         if inherits_national_context:
             return
 

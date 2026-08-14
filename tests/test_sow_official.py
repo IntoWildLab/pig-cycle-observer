@@ -143,6 +143,70 @@ def test_nbs_sow_clause_inherits_adjacent_national_hog_context() -> None:
     _require_national_sow_content(text)
 
 
+def test_nbs_old_template_sow_clause_inherits_across_statistical_continuation() -> None:
+    url = "https://www.stats.gov.cn/old-template.htm"
+    html = (
+        "<html><body><div>2024/10/18 10:00</div>"
+        "<p>2024年三季度末，全国生猪存栏42694万头，同比减少1535万头，下降3.5%；"
+        "环比增加1160万头，增长2.8%。"
+        "其中，能繁母猪存栏4062万头，同比减少178万头，下降4.2%；"
+        "环比增加25万头，增长0.6%，基础产能继续小幅调增。</p>"
+        "</body></html>"
+    )
+    session = _Session(_Response(html.encode(), url=url))
+
+    record = fetch_sow_record_from_official_url(url, session=session)
+
+    assert record.month == "2024-09"
+    assert record.sow_inventory == 4062.0
+    assert record.publish_date == date(2024, 10, 18)
+    assert record.source_type is SowSourceType.NBS
+
+
+def test_nbs_sow_clause_does_not_inherit_across_unrelated_sentence() -> None:
+    text = (
+        "全国生猪存栏42694万头。"
+        "市场供应总体稳定。"
+        "其中，能繁母猪存栏4062万头。"
+    )
+
+    with pytest.raises(SowOfficialFetchError, match="not explicitly"):
+        _require_national_sow_content(text)
+
+
+def test_nbs_sow_clause_does_not_inherit_across_local_statistical_context() -> None:
+    text = (
+        "全国生猪存栏42694万头。"
+        "环比增加1160万头，四川省相关统计另行发布。"
+        "其中，能繁母猪存栏4062万头。"
+    )
+
+    with pytest.raises(SowOfficialFetchError, match="not explicitly"):
+        _require_national_sow_content(text)
+
+
+def test_local_sow_clause_is_rejected_after_national_statistical_continuation() -> None:
+    text = (
+        "全国生猪存栏42694万头。"
+        "环比增加1160万头，增长2.8%。"
+        "山东省能繁母猪存栏4062万头。"
+    )
+
+    with pytest.raises(SowOfficialFetchError, match="local"):
+        _require_national_sow_content(text)
+
+
+def test_unrelated_national_text_does_not_override_local_sow_scope() -> None:
+    text = (
+        "全国农业生产总体稳定。"
+        "市场供应充足。"
+        "四川省能繁母猪存栏500万头。"
+    )
+
+    with pytest.raises(SowOfficialFetchError, match="local"):
+        _require_national_sow_content(text)
+
+
 def test_nbs_visible_slash_publish_date_drives_quarter_month() -> None:
     url = "https://www.stats.gov.cn/sj/zxfbhjd/202607/t20260716_1964140.html"
     html = """<html><body>
