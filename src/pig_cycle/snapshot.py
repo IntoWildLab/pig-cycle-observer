@@ -9,6 +9,14 @@ from typing import Sequence
 from .moa_weekly import MoaWeeklyRecord
 from .sow_monthly import SowMonthlyRecord, SowSourceType
 from .storage import PigCycleStorage
+from .trend import (
+    MoaWeeklyMetric,
+    NumericTrendFeatures,
+    TrendDirection,
+    TrendIntervalUnit,
+    calculate_moa_weekly_trend,
+    calculate_sow_inventory_trend,
+)
 
 
 def _format_date(value: date | None) -> str:
@@ -21,6 +29,70 @@ def _format_price(value: float | None) -> str:
 
 def _format_change(value: float | None) -> str:
     return f"{value:g}%" if value is not None else "暂无"
+
+
+def _format_trend_percentage(value: float | None) -> str:
+    if value is None:
+        return "暂无"
+    if round(value, 2) == 0:
+        return "0.00%"
+    return f"{value:+.2f}%"
+
+
+def _format_terminal_streak(features: NumericTrendFeatures) -> str:
+    if features.latest_streak_direction is TrendDirection.UP:
+        return f"末端连续上升变化：{features.consecutive_up_count} 次"
+    if features.latest_streak_direction is TrendDirection.DOWN:
+        return f"末端连续下降变化：{features.consecutive_down_count} 次"
+    if features.latest_streak_direction is TrendDirection.FLAT:
+        return "末端相邻变化：持平"
+    return "末端连续变化：记录不足"
+
+
+def _format_interval_status(features: NumericTrendFeatures) -> str:
+    if features.has_irregular_intervals is None:
+        return "观测间隔：记录不足，无法检查"
+    unit = "天" if features.interval_unit is TrendIntervalUnit.DAYS else "个月"
+    actual = "/".join(str(value) for value in features.interval_units)
+    status = "存在不规则间隔" if features.has_irregular_intervals else "符合预期间隔"
+    return f"观测间隔：{status}（实际：{actual} {unit}）"
+
+
+def _format_trend_values(features: NumericTrendFeatures, *, indent: str = "") -> list[str]:
+    return [
+        f"{indent}- 窗口首尾变化：{_format_trend_percentage(features.cumulative_change_pct)}",
+        f"{indent}- 最新相邻变化：{_format_trend_percentage(features.latest_change_pct)}",
+        f"{indent}- {_format_terminal_streak(features)}",
+    ]
+
+
+def _format_moa_trend_summary(records: list[MoaWeeklyRecord]) -> list[str]:
+    metrics = (
+        ("仔猪", MoaWeeklyMetric.PIGLET_PRICE),
+        ("生猪", MoaWeeklyMetric.LIVE_HOG_PRICE),
+        ("猪粮比", MoaWeeklyMetric.DERIVED_PIG_CORN_RATIO),
+    )
+    calculated = [
+        (label, calculate_moa_weekly_trend(records, metric=metric))
+        for label, metric in metrics
+    ]
+    lines = ["MOA 趋势特征摘要（当前展示窗口）"]
+    for label, features in calculated:
+        lines.append(f"- {label}")
+        lines.extend(_format_trend_values(features, indent="  "))
+    lines.append(f"- {_format_interval_status(calculated[0][1])}")
+    return lines
+
+
+def _format_sow_trend_summary(
+    records: list[SowMonthlyRecord], source_type: SowSourceType
+) -> list[str]:
+    features = calculate_sow_inventory_trend(records, source_type=source_type)
+    return [
+        f"趋势特征摘要（{source_type.value}，当前展示窗口）",
+        *_format_trend_values(features),
+        f"- {_format_interval_status(features)}",
+    ]
 
 
 def _format_sow_record(record: SowMonthlyRecord) -> list[str]:
@@ -197,6 +269,7 @@ def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
         lines.append("- 暂无周度历史数据")
     else:
         lines.extend(_format_moa_weekly_history(weekly_history))
+        lines.extend(["", *_format_moa_trend_summary(weekly_history)])
 
     lines.extend(["", "能繁母猪月度最新数据（按来源）"])
     if not sow_records:
@@ -219,6 +292,7 @@ def build_pig_cycle_snapshot(storage: PigCycleStorage) -> str:
             )
             lines.extend(["", f"能繁母猪历史（{source_type.value}）"])
             lines.extend(_format_sow_history(history))
+            lines.extend(_format_sow_trend_summary(history, source_type))
     return "\n".join(lines)
 
 
