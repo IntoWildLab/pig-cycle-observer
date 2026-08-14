@@ -105,3 +105,19 @@
 **Why:** 一个窗口可以整体为“混合”，同时末端连续下降且首尾累计仍上涨。这些结论描述不同时间结构，强行合并会丢失信息并制造语义冲突。streak count 也不得解释为记录条数、周数或月数。
 
 **Status:** Active
+
+## 2026-08 — Keep current effective tables and add separate revision history
+
+**Decision:** 保留以 `collection_date` 和 `(month, source_type)` 为业务键的 current effective tables，继续服务 Snapshot、current Trend 和日常流程；未来以独立 append-only tables 保存 MOA weekly 与 sow monthly 的完整 revisions，而不把 current tables 改造成 multi-version tables。
+
+**Why:** 这是对现有读取和日常流程破坏最小的方案，并允许 historical as-of、calibration 和未来 backtest 的版本语义独立演进。revision 表示具体官方 payload/version，首次观察时的 save status 只描述相对于当时 current state 的处理结果，不扩展为通用 event-sourcing。`processed_sources` 继续只承担 URL 去重和请求记忆，不能替代完整历史证据。当前 revision tables 尚未实现。
+
+**Status:** Approved design; implementation pending
+
+## 2026-08 — Point-in-time distinguishes official availability from system knowledge
+
+**Decision:** 未来 point-in-time reader 必须区分 official-availability as-of（按官方 `publish_date`）与 system-knowledge as-of（按首次成功观察的 `observed_at` 和历史处理顺序）。业务所属日期、官方发布时间和系统观察时间必须分别保存，不得互相冒充。
+
+**Why:** 历史页面可能在官方发布多年后才被系统回填。只按发布日期可以研究理论可获得信息，但不能描述自动化系统当时实际知道什么。现有 Trend `as_of` 仅过滤传入 current records 的发布日期，不能恢复旧 revision。baseline import 必须保留来源标记和真实观察证据；同 URL 原地修订目前也可能因永久 URL 去重而无法自动发现。
+
+**Status:** Approved design; implementation pending

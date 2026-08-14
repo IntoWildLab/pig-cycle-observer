@@ -263,6 +263,17 @@ Snapshot 的“所示记录方向”归纳整个当前展示窗口内全部相�
 
 Trend v0 已支持按 `as_of` 对官方 `publish_date` 做最后一道过滤，从而阻止晚于判断时点发布的当前记录进入计算。但当前 storage 只保存当前有效业务版本，不能完整重建已被后续修订覆盖的旧版本。完整 point-in-time revision history 属于未来独立存储能力，不能把当前 `as_of` 过滤描述为完整历史复原。
 
+### Historical calibration 的 point-in-time 前置条件
+
+正式 historical calibration、lead-lag、阈值研究或 backtest 前，计划先保留现有 current effective tables，并增加独立 append-only revision history。历史读取必须明确选择两种不同问题之一：
+
+- **official-availability as-of**：按官方 `publish_date` 判断理论上已经公开的数据版本；
+- **system-knowledge as-of**：按系统首次成功观察版本的 `observed_at` 和历史保存判定，重建系统当时实际知道的 effective state。
+
+业务所属日期、官方发布日期和系统观察时间不得互相替代。历史回填记录尤其不能因为官方发布日期较早，就假装系统当时已经掌握。未来链路应保持为 `revision storage → point-in-time reader → domain records → Trend pure functions`：Storage 负责版本选择和冲突处理，Trend 继续只负责机械特征。
+
+revision tables、point-in-time reader 和两种 as-of 目前均尚未实现。开始正式校准前还必须具备 append-only revision persistence、可靠 `observed_at`、baseline provenance、conflict / order-unknown 处理和防止 look-ahead 的回归测试。当前 `processed_sources` 会跳过已处理 URL，因此同 URL 原地修订仍是明确的检测边界，不能通过高频重复请求来掩盖。
+
 ## 10. 模型设计原则
 
 第一版优先采用：
