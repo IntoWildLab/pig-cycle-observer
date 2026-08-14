@@ -136,15 +136,16 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 已建立正式 Trend Feature Layer：`Fact Layer → Trend Feature Layer → future Cycle Layer`。当前可计算最新/前值、相邻及累计变化、末端连续方向、真实观测间隔和 irregular 标记，但不输出周期阶段、置信度或投资判断。
 - 当前历史深度已完成一次工程审计：MOA 为 12 条连续周度观测（2026-05-21 至 2026-08-06，全部相邻 7 天），NBS 为 8 个季度末锚点（2024-09 至 2026-06，全部相邻 3 个月）。这些数据足以验证存储和机械趋势链路，但不足以直接宣布周期规律或投资结论。
 - 已实现独立 append-only revision schema、normal revision persistence、canonical fingerprint v1、只读 baseline preflight audit 和单事务 baseline bootstrap。current tables 仍是日常 Snapshot/Trend 的有效状态来源；revision tables 尚未接管 current reader。
+- 正式 `data/pig_cycle.sqlite3` 的 Formal Revision Baseline Migration 已完成人工验收：12 条 MOA weekly 与 8 条 NBS sow current rows 均已有合法 `baseline_import` replay seed，第二次幂等 audit 完整通过，Production Gate 已开启。
 
 尚未完成：
 
 - 周度价格与月度产能的统一时间序列和数据质量状态。
-- 正式库 revision baseline migration，以及完整 point-in-time reader 的 official-availability / system-knowledge 两种 as-of 语义。
+- 完整 point-in-time reader 的 official-availability / system-knowledge 两种 as-of 语义。
 - 猪周期阶段模型、V2A 评分或投资信号。
 - 与 V1 主 CLI、Web、报告、邮件或 daily pipeline 的集成。
 
-Step 1C 的第一阶段已经完成。当前下一步是先对正式库执行受控 baseline migration 与审计；baseline complete 并解除 production gate 后，下一技术阶段才是 Point-in-Time Reader。historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
+Step 1C 与正式 revision baseline migration 已经完成。当前正式进入 Point-in-Time Reader：让系统能够回答“站在过去某个时间点，当时系统究竟知道哪些数据”，并分别实现 system-knowledge as-of 与 official-availability as-of。historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
 
 ### Step 1C 为什么出现
 
@@ -205,9 +206,15 @@ Point-in-time 必须区分三类时间：
 
 `BASELINE COMPLETE` 不能通过 revision row count 与 current row count 相等来判断。必须逐 current business key 验证同 `source_url`、同 production fingerprint、完整 stored payload 逐字段一致、`sets_current=1`；existing normal revision 仅在 `save_status` 为 `inserted/updated` 且 `sets_current=1` 时可作为 seed。按 `observed_at ASC, revision_id ASC` replay 后，最终 sets-current revision 必须与 current table 一致，且不存在 blocker；baseline 不得修改 current 或 `processed_sources`。当前无法恢复 revision 能力启用前未保存的被覆盖或忽略 payload，这一历史缺口继续保留。
 
-**Production activation gate 仍关闭：** 正式 `data/pig_cycle.sqlite3` 尚未执行 baseline migration；当前审计预期为 MOA current 12、Sow current 8、`processed_sources` 20，但这些数量不得硬编码进生产逻辑。在 baseline complete 前，不得使用 revision-aware save path 让既有 current 发生新 update。正式启用顺序是：停止 writer → 备份并验证正式 SQLite → 显式 `initialize_schema()` → read-only baseline preflight → 人工审阅 counts/blockers/warnings/fallback → 单事务 bootstrap → post-write audit → second idempotent audit → 确认 12/12 与 8/8 coverage → 解除 gate。
+**Formal Baseline Migration 已完成，Production Gate 已开启：** 迁移前正式库 census 为 MOA current 12、Sow current 8、`processed_sources` 20（MOA/Sow 各 12/8）；MOA 范围为 2026-05-21 至 2026-08-06，Sow 为 8 条 NBS、范围 2024-09 至 2026-06。迁移前 revision tables 不存在。
 
-推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。正式 baseline migration 与 audit 是当前下一阶段；完成后才进入 Point-in-Time Reader，分别实现 system-knowledge as-of 和 official-availability as-of。current reader 目前尚未切换到 revision replay；point-in-time reader 完成前，不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
+迁移前使用 `sqlite3.Connection.backup()` 创建并保留 verified backup：`data/backups/pig_cycle-before-revision-baseline-20260814T200002.369029Z.sqlite3`。backup 的 integrity、logical counts 和三张 existing tables digests 均与 source 一致。显式 `initialize_schema()` 后，两张 revision tables 已创建且初始为 0/0；current/processed counts 与 migration safety digests 均未变化：MOA `511414fbe728220298db64054c07caf394ffba95bddf6a61d0d4b0f8220ea318`，Sow `e6fc08442b53622e826b1c61eb541a5944431d8ec9726e16a10a742863c29ba3`，processed `a593ec8a8b39067b6fa546e400617c4787d2e8ad5ff50d29c9009d26f252ed9d`。这些是 migration safety evidence，不是 domain fingerprint v1。
+
+正式 read-only preflight 显示 Weekly/Sow current 与 insertable 分别为 12/12 和 8/8，existing 均为 0；20 条记录全部使用可信 `current.updated_at`，无 `import_time_fallback`、warning 或 blocker，结果为 `ready_to_apply=true, complete=false, applied=false`。单事务 bootstrap 随后成功插入 12+8 条 baseline revisions，同事务 post-write audit 通过，结果为 `true/true/true`。第二次幂等 audit 显示 insertable 0、existing 12+8、`true/true/false`，无 warning/blocker。
+
+最终验证 `integrity_check=ok`，current/processed counts 和上述 digests 保持不变；MOA/Sow revision counts 为 12/8，全部为 `ingest_origin=baseline_import`、`save_status=NULL`、`sets_current=1`，`stop_reasons=[]`。这意味着既有 current state 已有合法 revision replay seed，future normal revision-aware save 不再受旧 current 缺少 baseline 的迁移阻断；它不表示 Point-in-Time Reader、历史校准、回测或 Cycle Layer 已完成。
+
+推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。当前下一阶段是 Point-in-Time Reader，分别实现 system-knowledge as-of（截止历史时间，本系统实际观察到的 revisions）和 official-availability as-of（截止历史时间，官方理论上已发布的信息）。current Snapshot、current Trend 和正常 current state 仍读取 `moa_weekly_records` / `sow_monthly_records`；revision tables 当前包含 12+8 个 baseline replay seeds，并将由未来 normal ingest 继续 append evidence。`processed_sources` 仍只负责 URL memory/provenance mapping。point-in-time reader 完成前，不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
 
 ### V2 阶段关系与最终目标
 

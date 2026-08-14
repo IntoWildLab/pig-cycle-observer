@@ -150,6 +150,14 @@
 
 **Decision:** 正式库启用 revision-aware writes 前，必须停止 writer、备份并验证数据库、显式初始化 revision schema、执行只读 preflight、人工审阅问题与 fallback、在单个事务中 bootstrap、完成 post-write audit 和第二次幂等 audit；只有逐 current coverage 完整后才能解除 gate。
 
-**Why:** revision 能力已在代码中实现，但正式库尚未写入 baseline。先写入新的 current update 会让既有 current state 缺少可靠 replay seed；单事务和双重审计可避免部分迁移或把“可写”误当成“已完成”。
+**Why:** 在正式 baseline 前写入新的 current update，会让既有 current state 缺少可靠 replay seed；单事务和双重审计可避免部分迁移或把“可写”误当成“已完成”。
 
-**Status:** Active gate; production baseline pending
+**Status:** Satisfied. Formal baseline migration completed; Production Gate OPEN.
+
+## 2026-08 — Formal revision baseline migration is complete
+
+**Decision:** 正式 `data/pig_cycle.sqlite3` 已完成并通过 revision baseline migration。12 条 MOA weekly 与 8 条 NBS sow current records 均建立了 `baseline_import`、`save_status=NULL`、`sets_current=1` 的 replay seed；current tables 继续服务 current Snapshot/Trend，revision tables 保存历史证据并供未来 point-in-time replay 使用。
+
+**Why:** 正式执行包含 verified SQLite backup、read-only preflight、零 warning/blocker、单事务 bootstrap、post-write audit、第二次幂等 audit 和最终 integrity/digest 验证。current/processed counts 与 migration safety digests 前后不变，最终 revision coverage 为 12/12 + 8/8，因此旧 current 缺少 baseline 的 production blocker 已解除。
+
+**Status:** Complete. Production Gate OPEN; Point-in-Time Reader is next.
