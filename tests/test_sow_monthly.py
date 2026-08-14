@@ -60,6 +60,35 @@ def test_sow_clause_with_only_monthly_change_keeps_yearly_change_none() -> None:
     assert record.yoy_change is None
 
 
+def test_slight_decline_is_negative() -> None:
+    record = _parse("5月末能繁母猪存栏4035万头，环比略降0.2%")
+
+    assert record.mom_change == -0.2
+
+
+def test_slight_increase_is_positive() -> None:
+    record = _parse("5月末能繁母猪存栏4035万头，环比略增0.2%")
+
+    assert record.mom_change == 0.2
+
+
+def test_absolute_change_followed_by_slight_decline_percentage() -> None:
+    record = _parse("5月末能繁母猪存栏4035万头，环比减少9万头，略降0.2%")
+
+    assert record.mom_change == -0.2
+
+
+def test_unprefixed_year_end_change_is_not_inferred_as_monthly_or_yearly() -> None:
+    record = _parse(
+        "2024年末，全国生猪存栏比上年末减少。"
+        "其中，能繁母猪存栏4078万头，减少64万头，下降1.6%。",
+        published=date(2025, 1, 17),
+    )
+
+    assert record.mom_change is None
+    assert record.yoy_change is None
+
+
 def test_hog_changes_before_sow_without_local_changes_are_not_borrowed() -> None:
     record = _parse(
         "全国生猪存栏42694万头，同比下降3.5%；环比增长2.8%。"

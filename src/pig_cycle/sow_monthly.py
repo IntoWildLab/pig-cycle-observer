@@ -15,7 +15,7 @@ CAPACITY_YELLOW_LOW_UPPER = 0.92
 CAPACITY_GREEN_UPPER = 1.03
 CAPACITY_YELLOW_HIGH_UPPER = 1.06
 _QUARTER_END_MONTHS = {"一": 3, "二": 6, "三": 9, "四": 12}
-_CHANGE_DIRECTIONS = r"增长|上升|增加|下降|减少|下调"
+_CHANGE_DIRECTIONS = r"增长|上升|增加|略增|下降|减少|下调|略降"
 _SOW_INVENTORY_PATTERN = re.compile(
     r"(?:全国)?能繁母猪存栏(?:量)?"
     r"(?:为|达到|达|下调至|上调至|降至|升至)?"
@@ -151,7 +151,7 @@ def _parse_change(clauses: tuple[str, ...], prefix: str) -> Optional[float]:
         if match:
             direction, value_text = match.groups()
             value = float(value_text)
-            return -value if direction in {"下降", "减少", "下调"} else value
+            return -value if direction in {"下降", "减少", "下调", "略降"} else value
     return None
 
 
