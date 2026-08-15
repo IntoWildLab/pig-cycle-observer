@@ -62,7 +62,8 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
   - 不自动翻页，不做全站扫描。
 - `storage.py`
   - 使用独立 SQLite 保存周度价格、月度母猪数据、已处理来源和 append-only revisions。
-  - 提供原子 current/revision 写入、修订判断、纯本地 known-state 读取，以及 revision baseline 审计和引导写入。
+  - 提供原子 current/revision 写入、修订判断、纯本地 known-state 读取、revision baseline 审计和引导写入，以及 System-Knowledge as-of replay。
+  - revision reader 和 normal save 均执行基于中国业务时间的 future-business integrity 校验。
 - `coordinator.py`
   - 将本地 processed URL 记忆接入 MOA 周度日常增量流程。
   - 保持获取层和存储层职责分离，不增加 Step 1B 请求预算。
@@ -115,6 +116,8 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 | `a79efaf` | 新增猪周期 revision schema v0 |
 | `03c65dd` | 原子持久化猪周期 revisions |
 | `e31c2a0` | 新增 revision baseline 审计与 bootstrap |
+| `0fa83d8` | 新增 System-Knowledge as-of reader |
+| `6b88df0` | 校验 revision future business time |
 
 真实官网 smoke test 已覆盖 MOA 周报、MOA 母猪数据和 NBS 季度母猪数据的关键文本语义。
 
@@ -137,15 +140,18 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 当前历史深度已完成一次工程审计：MOA 为 12 条连续周度观测（2026-05-21 至 2026-08-06，全部相邻 7 天），NBS 为 8 个季度末锚点（2024-09 至 2026-06，全部相邻 3 个月）。这些数据足以验证存储和机械趋势链路，但不足以直接宣布周期规律或投资结论。
 - 已实现独立 append-only revision schema、normal revision persistence、canonical fingerprint v1、只读 baseline preflight audit 和单事务 baseline bootstrap。current tables 仍是日常 Snapshot/Trend 的有效状态来源；revision tables 尚未接管 current reader。
 - 正式 `data/pig_cycle.sqlite3` 的 Formal Revision Baseline Migration 已完成人工验收：12 条 MOA weekly 与 8 条 NBS sow current rows 均已有合法 `baseline_import` replay seed，第二次幂等 audit 完整通过，Production Gate 已开启。
+- 已实现 System-Knowledge as-of reader，可仅从 revision tables 按历史 cutoff 重建当时系统已知的 effective state，并保持 current path 与 historical path 隔离。
+- 已实现 Future Business-Time Integrity：revision reader 防御既有坏证据，normal save 在数据库 mutation 前拒绝未来业务日期/期间。
 
 尚未完成：
 
 - 周度价格与月度产能的统一时间序列和数据质量状态。
-- 完整 point-in-time reader 的 official-availability / system-knowledge 两种 as-of 语义。
+- Official-Availability as-of reader；System-Knowledge as-of reader 已完成。
+- System Historical Trend Wrapper；当前 reader 与 Trend pure functions 尚未通过专用薄接线层组合。
 - 猪周期阶段模型、V2A 评分或投资信号。
 - 与 V1 主 CLI、Web、报告、邮件或 daily pipeline 的集成。
 
-Step 1C 与正式 revision baseline migration 已经完成。当前正式进入 Point-in-Time Reader：让系统能够回答“站在过去某个时间点，当时系统究竟知道哪些数据”，并分别实现 system-knowledge as-of 与 official-availability as-of。historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
+Step 1C、正式 revision baseline migration、System-Knowledge as-of reader 与 Future Business-Time Integrity 已经完成。下一阶段是 V2 Step 2B-5C-2 System Historical Trend Wrapper；Official-Availability reader、historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
 
 ### Step 1C 为什么出现
 
@@ -190,7 +196,7 @@ Point-in-time 必须区分三类时间：
 - official time：官方 `publish_date`，表示理论公开时间；
 - system knowledge time：`observed_at`，表示系统首次成功获取并解析该版本的时间。
 
-未来 reader 必须分别支持 official-availability as-of 与 system-knowledge as-of。历史页面可能早已发布但直到多年后才由系统回填，两种语义不能混用；不得用 `publish_date` 冒充 `observed_at`，也不得用迁移时间冒充 `publish_date`。
+Point-in-time contract 必须区分 official-availability as-of 与 system-knowledge as-of；后者已经实现，前者仍暂停。历史页面可能早已发布但直到多年后才由系统回填，两种语义不能混用；不得用 `publish_date` 冒充 `observed_at`，也不得用迁移时间冒充 `publish_date`。
 
 `older_ignored`、`conflict`、`order_unknown` 和来自新 URL 的 `unchanged` 版本现在均可保留完整 revision，但不得因此静默改变 current effective row。conflict 不得在未来历史查询中任意选择；发布日期缺失时也不得使用本地处理时间猜测官方先后。
 
@@ -212,9 +218,38 @@ Point-in-time 必须区分三类时间：
 
 正式 read-only preflight 显示 Weekly/Sow current 与 insertable 分别为 12/12 和 8/8，existing 均为 0；20 条记录全部使用可信 `current.updated_at`，无 `import_time_fallback`、warning 或 blocker，结果为 `ready_to_apply=true, complete=false, applied=false`。单事务 bootstrap 随后成功插入 12+8 条 baseline revisions，同事务 post-write audit 通过，结果为 `true/true/true`。第二次幂等 audit 显示 insertable 0、existing 12+8、`true/true/false`，无 warning/blocker。
 
-最终验证 `integrity_check=ok`，current/processed counts 和上述 digests 保持不变；MOA/Sow revision counts 为 12/8，全部为 `ingest_origin=baseline_import`、`save_status=NULL`、`sets_current=1`，`stop_reasons=[]`。这意味着既有 current state 已有合法 revision replay seed，future normal revision-aware save 不再受旧 current 缺少 baseline 的迁移阻断；它不表示 Point-in-Time Reader、历史校准、回测或 Cycle Layer 已完成。
+最终验证 `integrity_check=ok`，current/processed counts 和上述 digests 保持不变；MOA/Sow revision counts 为 12/8，全部为 `ingest_origin=baseline_import`、`save_status=NULL`、`sets_current=1`，`stop_reasons=[]`。这意味着既有 current state 已有合法 revision replay seed，future normal revision-aware save 不再受旧 current 缺少 baseline 的迁移阻断；该迁移本身不表示 System-Knowledge Reader、Official-Availability Reader、历史校准、回测或 Cycle Layer 已完成。System-Knowledge Reader 是随后由 `0fa83d8` 独立完成的能力。
 
-推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。当前下一阶段是 Point-in-Time Reader，分别实现 system-knowledge as-of（截止历史时间，本系统实际观察到的 revisions）和 official-availability as-of（截止历史时间，官方理论上已发布的信息）。current Snapshot、current Trend 和正常 current state 仍读取 `moa_weekly_records` / `sow_monthly_records`；revision tables 当前包含 12+8 个 baseline replay seeds，并将由未来 normal ingest 继续 append evidence。`processed_sources` 仍只负责 URL memory/provenance mapping。point-in-time reader 完成前，不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
+推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。System-Knowledge as-of 已完成，Official-Availability as-of 仍暂停。current Snapshot、current Trend 和正常 current state 仍读取 `moa_weekly_records` / `sow_monthly_records`；historical System-Knowledge path 只读取 revision tables。`processed_sources` 仍只负责 URL memory/provenance mapping。下一阶段只增加 reader 到既有 Trend pure functions 的薄接线；在此之前不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
+
+### System-Knowledge As-Of 与 Future Business-Time Integrity
+
+`PigCycleStorage.get_moa_weekly_records_as_of_system(cutoff)` 和 `PigCycleStorage.get_sow_monthly_records_as_of_system(cutoff)` 已正式实现。`cutoff` 必须是 timezone-aware `datetime`，可使用任意 aware timezone，进入 reader 后统一规范为 UTC；可见性边界为 inclusive 的 `observed_at <= cutoff`。System-Knowledge visibility 只由 Knowledge Time 决定，不使用 `publish_date`。
+
+Historical replay 的 MOA business key 为 `collection_date`，Sow business key 为 `(month, source_type)`。revision 按 `observed_at ASC, revision_id ASC` 重放；只有 `sets_current=1` 能改变 effective historical state。`sets_current=0` 的 `unchanged`、`older_ignored`、`conflict` 和 Sow `order_unknown` 只保留历史 evidence，不能创建、覆盖或删除 effective state。当前没有 tombstone/delete 语义。
+
+System reader 只从 revision tables 恢复领域记录，不 fallback current tables，也不允许 current-state leakage。MOA replay 恢复 revision 中保存的完整 payload，包括原样保存的 `derived_pig_corn_ratio`，不在 historical reader 中重新派生。
+
+Baseline import revision 不是“历史第一版本”，而是 revision 能力启用时 current effective payload 的 replay seed。seed 只有到达自己的 `observed_at` 才可见；cutoff 早于 baseline seeds 时返回空历史是正确行为。不得把 baseline backdate 到 `publish_date`，不得因业务期间较早向过去回填，也不得假设系统在 seed 的 Knowledge Time 之前已经知道 exact payload。
+
+Reader 使用 fail-loud defensive replay。stored `observed_at` 必须是可按 ISO 解析、timezone-aware 且 UTC offset 为 0 的字符串；metadata 与 business time 也必须一致。损坏证据抛出带 `table`、`revision_id`、`field` 的 `PigCycleRevisionDataError`，不静默跳过。完整性校验发生在 cutoff visibility 判断之前，因此即使坏 revision 的 `observed_at` 晚于本次 cutoff，也不能被隐藏。
+
+三种时间保持严格分离：
+
+- **Business Time：** MOA `collection_date`；Sow `month`，表示 completed period。
+- **Knowledge Time：** revision `observed_at`，决定 System-Knowledge visibility。
+- **Publish Time：** 官方 `publish_date`；本阶段不参与 System-Knowledge visibility 或 future-business integrity，也不建立 `publish_date <= cutoff/observed_at` 规则。
+
+China Business Time 固定为 UTC+08:00，使用 Python 标准库 fixed offset，不随 caller cutoff 的 timezone 改变。MOA 要求 `collection_date <= observed_at` 转为 UTC+08:00 后的 local date，允许同日。Sow 的 `month` 对 `nbs`、`moa_reported`、`moa_estimate` 均表示 completed period，按该月最后一个日历日解释，并要求 `month_end <= observed local date`；实现正确处理大小月、闰年和年份边界。
+
+同一规则也用于 normal ingest。`save_moa_weekly()` 和 `save_sow_monthly()` 各只调用一次 `_utc_now()`，同一 observation instant 同时用于 business-time validation、current timestamps、`processed_at` 和 revision `observed_at`；校验在数据库 mutation 前完成。stored revision corruption 使用 `PigCycleRevisionDataError`，尚未写入的 normal input contradiction 使用 `ValueError`。
+
+Current 与 historical 路径保持独立：
+
+- Current path：`current tables → domain records → Trend pure functions`。
+- Historical System-Knowledge path：`revision tables → System-Knowledge Reader → domain records → Trend pure functions`。
+
+Trend 仍是纯函数层，不理解 `observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。V2 Step 2B-5C-2 System Historical Trend Wrapper 尚未实现；Official-Availability Reader、publish-date historical replay、official availability intersection、Historical Calibration、lead-lag、threshold research、backtest、Cycle Stage、historical Snapshot 和 investment signal fusion 均继续暂停。
 
 ### V2 阶段关系与最终目标
 
@@ -395,3 +430,10 @@ V2 早期获取农业农村部等政府官方网站数据时，曾尝试较广�
 - NBS 母猪 `3961 → 3904 → 3780`：latest change `-124`（约 `-3.18%`），cumulative change `-181`（约 `-4.57%`），terminal down count `2`；间隔为 `3/3` 个月，irregular 为 `false`。
 
 这些结果全部是机械趋势特征，不是猪周期阶段、趋势确认、置信度或投资判断。
+
+### System-Knowledge 与 Business-Time 里程碑验证（2026-08-15）
+
+- `0fa83d8 feat: add system knowledge as-of reader`：commit 前 Storage `212 passed`，V2 selected regression `411 passed`。
+- `6b88df0 feat: validate revision business time`：commit 前 Storage `236 passed`，V2 selected regression `435 passed`。
+
+这些数字只记录对应里程碑当时的本地验收结果，不是永久 API contract；运行中仅出现既有且无关的 FastAPI/Starlette warning。

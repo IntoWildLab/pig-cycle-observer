@@ -112,15 +112,15 @@
 
 **Why:** 这是对现有读取和日常流程破坏最小的方案，并允许 historical as-of、calibration 和未来 backtest 的版本语义独立演进。revision 表示具体官方 payload/version，首次观察时的 save status 只描述相对于当时 current state 的处理结果，不扩展为通用 event-sourcing。normal save 已将 processed/current/revision evidence 原子提交；current reader 仍读取 current effective tables，尚未切换到 revision replay。
 
-**Status:** Active; point-in-time readers pending
+**Status:** Active; System-Knowledge reader complete, Official-Availability reader pending
 
 ## 2026-08 — Point-in-time distinguishes official availability from system knowledge
 
-**Decision:** 未来 point-in-time reader 必须区分 official-availability as-of（按官方 `publish_date`）与 system-knowledge as-of（按首次成功观察的 `observed_at` 和历史处理顺序）。业务所属日期、官方发布时间和系统观察时间必须分别保存，不得互相冒充。
+**Decision:** point-in-time reader 必须区分 official-availability as-of（按可追溯的官方可获得性证据；`publish_date` 是重要字段，但不足以单独重建 exact payload 历史）与 system-knowledge as-of（按首次成功观察的 `observed_at` 和历史处理顺序）。业务所属日期、官方发布时间和系统观察时间必须分别保存，不得互相冒充。System-Knowledge reader 已实现，Strict Official-Availability reader 仍暂停。
 
-**Why:** 历史页面可能在官方发布多年后才被系统回填。只按发布日期可以研究理论可获得信息，但不能描述自动化系统当时实际知道什么。现有 Trend `as_of` 仅过滤传入 current records 的发布日期，不能恢复旧 revision。baseline import 必须保留来源标记和真实观察证据；同 URL 原地修订目前也可能因永久 URL 去重而无法自动发现。
+**Why:** 历史页面可能在官方发布多年后才被系统回填，也可能在同一 URL 原地修订；当前抓到的 payload 不一定等于原始 `publish_date` 当时可获得的 exact payload。只有 `publish_date` 无法证明历史版本身份，直接按发布日期回放可能引入 revision bias 或 look-ahead bias。严格 Official-Availability 未来需要更强的可追溯版本证据，例如官方 revision/version timestamp、immutable version URL、archived exact response 或 exact-payload first-seen evidence；具体实现仍未定义。现有 Trend `as_of` 仅过滤传入 current records 的发布日期，不能恢复旧 revision；baseline import 也必须保留来源标记和真实观察证据。
 
-**Status:** Active contract; readers pending
+**Status:** Active contract; System-Knowledge reader complete, Official-Availability reader pending
 
 ## 2026-08 — Baseline exact-payload time uses current updated_at
 
@@ -160,4 +160,20 @@
 
 **Why:** 正式执行包含 verified SQLite backup、read-only preflight、零 warning/blocker、单事务 bootstrap、post-write audit、第二次幂等 audit 和最终 integrity/digest 验证。current/processed counts 与 migration safety digests 前后不变，最终 revision coverage 为 12/12 + 8/8，因此旧 current 缺少 baseline 的 production blocker 已解除。
 
-**Status:** Complete. Production Gate OPEN; Point-in-Time Reader is next.
+**Status:** Complete. Production Gate OPEN; System-Knowledge reader subsequently completed.
+
+## 2026-08 — System-Knowledge replay is revision-only and observed-time based
+
+**Decision:** `get_moa_weekly_records_as_of_system()` 与 `get_sow_monthly_records_as_of_system()` 只从 revision tables 按 inclusive `observed_at <= cutoff` 恢复历史 effective state。cutoff 必须 timezone-aware 并规范为 UTC；replay 使用 `observed_at ASC, revision_id ASC`，且只有 `sets_current=1` 改变 state。`publish_date` 不参与 System-Knowledge visibility，reader 不 fallback current tables，也不重新派生 revision 中已保存的 MOA 猪粮比。
+
+**Why:** System-Knowledge 问题回答的是“截至 cutoff，系统实际观察到什么”，而不是“官方理论上何时发布”。混入 current rows、发布时间或重新计算 payload 会产生历史泄漏。`sets_current=0` revisions 是 evidence 而不是有效状态事件；baseline seed 也只能从自身 `observed_at` 起可见，不能向过去回填。
+
+**Status:** Complete in `0fa83d8`; Official-Availability reader remains pending
+
+## 2026-08 — Revision business time cannot be later than its knowledge time
+
+**Decision:** Future Business-Time Integrity 固定使用 UTC+08:00 中国业务时间，并相对于每条 revision 自身的 `observed_at` 校验，而不是 caller cutoff。MOA 要求 `collection_date` 不晚于 observed local date；Sow 的 `month` 对 `nbs`、`moa_reported`、`moa_estimate` 均作为 completed period，要求月末不晚于 observed local date。reader 在 visibility 判断前 fail loud 校验所有 evidence；normal save 使用同一次 `_utc_now()` 并在数据库 mutation 前拒绝矛盾输入。
+
+**Why:** 一条 revision 在被系统观察时若包含尚未发生的业务日期/期间，即使未来 cutoff 已经过了该日期，它仍是会引入 look-ahead bias 的坏证据。Business Time、Knowledge Time 与 Publish Time 必须分离；本决定不新增任何 `publish_date <= cutoff/observed_at` 规则。
+
+**Status:** Complete in `6b88df0`; Historical Trend Wrapper remains pending
