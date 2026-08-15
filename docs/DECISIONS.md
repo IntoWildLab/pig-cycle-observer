@@ -176,4 +176,12 @@
 
 **Why:** 一条 revision 在被系统观察时若包含尚未发生的业务日期/期间，即使未来 cutoff 已经过了该日期，它仍是会引入 look-ahead bias 的坏证据。Business Time、Knowledge Time 与 Publish Time 必须分离；本决定不新增任何 `publish_date <= cutoff/observed_at` 规则。
 
-**Status:** Complete in `6b88df0`; Historical Trend Wrapper remains pending
+**Status:** Complete in `6b88df0`; Historical Trend Wrapper subsequently completed
+
+## 2026-08 — System historical trend integration remains a thin wrapper
+
+**Decision:** `calculate_moa_weekly_trend_as_of_system(...)` 与 `calculate_sow_inventory_trend_as_of_system(...)` 组成 System Historical Trend Wrapper。历史链路固定为 `revision tables → System-Knowledge Reader → domain records → wrapper → existing Trend pure functions → NumericTrendFeatures`。MOA 直接 Reader → Trend；Sow 在 Reader 后按指定 `SowSourceType` 隔离再进入 Trend。wrapper 不重复 revision replay、business-time validation、排序或 fingerprint 逻辑，也不重新派生 stored MOA pig-corn ratio。
+
+**Why:** Knowledge-Time visibility 已由 Storage reader 完整负责，Business-Time mechanical features 已由 Trend pure functions 完整负责。薄接线可以复用两侧已验证契约，并避免让 Trend 理解 SQLite、`observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。System visibility 仍然只有 inclusive `observed_at <= cutoff`；wrapper 不增加 `publish_date <= cutoff`，也不把 cutoff 传给 Trend 的旧 publish-date `as_of`。
+
+**Status:** Complete in `4fe56f3`. Historical analysis/calibration preparation may follow, but the next concrete step is not yet frozen. Official-Availability Reader, Historical Calibration, Lead-Lag Analysis, Threshold Research, Backtest, Cycle Stage, Historical Snapshot and Investment Signal Fusion remain pending.

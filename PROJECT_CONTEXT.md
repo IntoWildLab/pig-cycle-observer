@@ -74,6 +74,9 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
   - 位于事实层与未来周期判断层之间，使用纯函数把领域记录转换为透明、可复用的机械趋势特征。
   - 不访问 SQLite、HTTP 或 LLM；结果使用 frozen `NumericTrendFeatures`。
   - 当前支持 MOA 的仔猪、生猪、玉米和派生猪粮比，以及按单一 `SowSourceType` 隔离的能繁母猪存栏。
+- `historical_trend.py`
+  - 将 System-Knowledge reader 恢复的领域记录薄接到既有 Trend pure functions。
+  - 提供 MOA 周度与按单一 `SowSourceType` 隔离的母猪历史趋势 API，不重复 revision replay 或业务时间校验。
 
 对应离线测试位于：
 
@@ -118,6 +121,7 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 | `e31c2a0` | 新增 revision baseline 审计与 bootstrap |
 | `0fa83d8` | 新增 System-Knowledge as-of reader |
 | `6b88df0` | 校验 revision future business time |
+| `4fe56f3` | 新增 System Historical Trend Wrapper |
 
 真实官网 smoke test 已覆盖 MOA 周报、MOA 母猪数据和 NBS 季度母猪数据的关键文本语义。
 
@@ -142,16 +146,16 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 正式 `data/pig_cycle.sqlite3` 的 Formal Revision Baseline Migration 已完成人工验收：12 条 MOA weekly 与 8 条 NBS sow current rows 均已有合法 `baseline_import` replay seed，第二次幂等 audit 完整通过，Production Gate 已开启。
 - 已实现 System-Knowledge as-of reader，可仅从 revision tables 按历史 cutoff 重建当时系统已知的 effective state，并保持 current path 与 historical path 隔离。
 - 已实现 Future Business-Time Integrity：revision reader 防御既有坏证据，normal save 在数据库 mutation 前拒绝未来业务日期/期间。
+- 已实现 System Historical Trend Wrapper，将单个 historical cutoff 下的 System-Knowledge records 交给既有 Trend pure functions，直接返回 `NumericTrendFeatures`。
 
 尚未完成：
 
 - 周度价格与月度产能的统一时间序列和数据质量状态。
 - Official-Availability as-of reader；System-Knowledge as-of reader 已完成。
-- System Historical Trend Wrapper；当前 reader 与 Trend pure functions 尚未通过专用薄接线层组合。
 - 猪周期阶段模型、V2A 评分或投资信号。
 - 与 V1 主 CLI、Web、报告、邮件或 daily pipeline 的集成。
 
-Step 1C、正式 revision baseline migration、System-Knowledge as-of reader 与 Future Business-Time Integrity 已经完成。下一阶段是 V2 Step 2B-5C-2 System Historical Trend Wrapper；Official-Availability reader、historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
+Step 1C、正式 revision baseline migration、System-Knowledge as-of reader、Future Business-Time Integrity 与 V2 Step 2B-5C-2 System Historical Trend Wrapper 已经完成。下一阶段进入 historical analysis/calibration preparation，但具体下一小步尚未正式冻结；Official-Availability reader、historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
 
 ### Step 1C 为什么出现
 
@@ -220,7 +224,7 @@ Point-in-time contract 必须区分 official-availability as-of 与 system-knowl
 
 最终验证 `integrity_check=ok`，current/processed counts 和上述 digests 保持不变；MOA/Sow revision counts 为 12/8，全部为 `ingest_origin=baseline_import`、`save_status=NULL`、`sets_current=1`，`stop_reasons=[]`。这意味着既有 current state 已有合法 revision replay seed，future normal revision-aware save 不再受旧 current 缺少 baseline 的迁移阻断；该迁移本身不表示 System-Knowledge Reader、Official-Availability Reader、历史校准、回测或 Cycle Layer 已完成。System-Knowledge Reader 是随后由 `0fa83d8` 独立完成的能力。
 
-推荐的长期链路是：`revision storage → point-in-time reader → domain records → Trend pure functions`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。System-Knowledge as-of 已完成，Official-Availability as-of 仍暂停。current Snapshot、current Trend 和正常 current state 仍读取 `moa_weekly_records` / `sow_monthly_records`；historical System-Knowledge path 只读取 revision tables。`processed_sources` 仍只负责 URL memory/provenance mapping。下一阶段只增加 reader 到既有 Trend pure functions 的薄接线；在此之前不进入正式 historical calibration、lead-lag、阈值研究或 backtest，Cycle Layer 继续暂停。
+当前历史链路已经形成：`revision tables → System-Knowledge Reader → domain records → Historical Trend Wrapper → existing Trend pure functions → NumericTrendFeatures`。Storage 负责截止 cutoff 哪个版本可见；Trend 继续只做机械计算，不查询 SQLite、不理解 `processed_sources`，也不处理 revision conflict。System-Knowledge as-of 已完成，Official-Availability as-of 仍暂停。current Snapshot、current Trend 和正常 current state 仍读取 `moa_weekly_records` / `sow_monthly_records`；historical System-Knowledge path 只读取 revision tables。`processed_sources` 仍只负责 URL memory/provenance mapping。historical wrapper 已完成，但不表示正式 historical calibration、lead-lag、阈值研究或 backtest 已开始，Cycle Layer 继续暂停。
 
 ### System-Knowledge As-Of 与 Future Business-Time Integrity
 
@@ -247,9 +251,11 @@ China Business Time 固定为 UTC+08:00，使用 Python 标准库 fixed offset�
 Current 与 historical 路径保持独立：
 
 - Current path：`current tables → domain records → Trend pure functions`。
-- Historical System-Knowledge path：`revision tables → System-Knowledge Reader → domain records → Trend pure functions`。
+- Historical System-Knowledge path：`revision tables → System-Knowledge Reader → domain records → Historical Trend Wrapper → Trend pure functions`。
 
-Trend 仍是纯函数层，不理解 `observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。V2 Step 2B-5C-2 System Historical Trend Wrapper 尚未实现；Official-Availability Reader、publish-date historical replay、official availability intersection、Historical Calibration、lead-lag、threshold research、backtest、Cycle Stage、historical Snapshot 和 investment signal fusion 均继续暂停。
+`calculate_moa_weekly_trend_as_of_system(...)` 直接执行 Reader → Trend；`calculate_sow_inventory_trend_as_of_system(...)` 在 Reader 后先按指定 `source_type` 隔离，再交给 Trend。wrapper 不重复 revision replay、business-time validation 或排序，也不重新派生 revision 中保存的 `derived_pig_corn_ratio`。System-Knowledge visibility 仍然只有 inclusive `observed_at <= cutoff`；wrapper 不增加 `publish_date <= cutoff`，也不把 cutoff 传给 Trend 的旧 publish-date `as_of`。
+
+Trend 仍是纯函数层，不理解 SQLite、`observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。Official-Availability Reader、publish-date historical replay、official availability intersection、Historical Calibration、lead-lag、threshold research、backtest、Cycle Stage、historical Snapshot 和 investment signal fusion 均继续暂停。
 
 ### V2 阶段关系与最终目标
 
@@ -437,3 +443,7 @@ V2 早期获取农业农村部等政府官方网站数据时，曾尝试较广�
 - `6b88df0 feat: validate revision business time`：commit 前 Storage `236 passed`，V2 selected regression `435 passed`。
 
 这些数字只记录对应里程碑当时的本地验收结果，不是永久 API contract；运行中仅出现既有且无关的 FastAPI/Starlette warning。
+
+### System Historical Trend Wrapper 里程碑验证（2026-08-15）
+
+`4fe56f3 feat: add system historical trend wrapper` 完成了单 cutoff 的 System-Knowledge Reader → Trend 薄接线。本阶段本地验收为 historical trend tests `12 passed, 1 warning`、Storage `236 passed, 1 warning`、selected V2 regression `447 passed, 1 warning`。这些数字只记录该里程碑当时的验收结果，不是永久 API contract。
