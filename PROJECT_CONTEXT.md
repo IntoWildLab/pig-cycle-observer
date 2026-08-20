@@ -147,6 +147,7 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 已实现 System-Knowledge as-of reader，可仅从 revision tables 按历史 cutoff 重建当时系统已知的 effective state，并保持 current path 与 historical path 隔离。
 - 已实现 Future Business-Time Integrity：revision reader 防御既有坏证据，normal save 在数据库 mutation 前拒绝未来业务日期/期间。
 - 已实现 System Historical Trend Wrapper，将单个 historical cutoff 下的 System-Knowledge records 交给既有 Trend pure functions，直接返回 `NumericTrendFeatures`。
+- 已完成 Historical Calibration Preparation（A2–A3）：具备不可变校准领域模型、System-Knowledge Calibration Input、Forward Outcome、Calibration Finalizer、自然月末 cutoff、完整单行编排和月度 Dataset 编排。
 
 尚未完成：
 
@@ -155,7 +156,7 @@ V2 代码独立放在 `src/pig_cycle/`，暂未接入 V1 daily pipeline、邮件
 - 猪周期阶段模型、V2A 评分或投资信号。
 - 与 V1 主 CLI、Web、报告、邮件或 daily pipeline 的集成。
 
-Step 1C、正式 revision baseline migration、System-Knowledge as-of reader、Future Business-Time Integrity 与 V2 Step 2B-5C-2 System Historical Trend Wrapper 已经完成。下一阶段进入 historical analysis/calibration preparation，但具体下一小步尚未正式冻结；Official-Availability reader、historical calibration、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
+Step 1C、正式 revision baseline migration、System-Knowledge as-of reader、Future Business-Time Integrity、V2 Step 2B-5C-2 System Historical Trend Wrapper，以及 A2–A3 Historical Calibration Preparation 已经完成。下一阶段为 **A4 Calibration Analysis — pending**，具体统计方法尚未冻结；Strict Official-Availability reader、正式 calibration analysis、lead-lag、阈值研究、backtest 和 Cycle Layer 均继续暂停。
 
 ### Step 1C 为什么出现
 
@@ -255,7 +256,47 @@ Current 与 historical 路径保持独立：
 
 `calculate_moa_weekly_trend_as_of_system(...)` 直接执行 Reader → Trend；`calculate_sow_inventory_trend_as_of_system(...)` 在 Reader 后先按指定 `source_type` 隔离，再交给 Trend。wrapper 不重复 revision replay、business-time validation 或排序，也不重新派生 revision 中保存的 `derived_pig_corn_ratio`。System-Knowledge visibility 仍然只有 inclusive `observed_at <= cutoff`；wrapper 不增加 `publish_date <= cutoff`，也不把 cutoff 传给 Trend 的旧 publish-date `as_of`。
 
-Trend 仍是纯函数层，不理解 SQLite、`observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。Official-Availability Reader、publish-date historical replay、official availability intersection、Historical Calibration、lead-lag、threshold research、backtest、Cycle Stage、historical Snapshot 和 investment signal fusion 均继续暂停。
+Trend 仍是纯函数层，不理解 SQLite、`observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。Strict Official-Availability Reader、publish-date historical replay、official availability intersection、A4 Calibration Analysis、lead-lag、threshold research、backtest、Cycle Stage、historical Snapshot 和 investment signal fusion 均继续暂停。
+
+### Historical Calibration Preparation（A2–A3）
+
+当前正式能力链为：
+
+```text
+Revision
+→ System-Knowledge Reader
+→ Historical Trend
+→ Calibration Input
+→ Forward Outcome
+→ Calibration Finalizer
+→ Monthly Cutoff Generator
+→ Full Calibration Row Builder
+→ Calibration Dataset Builder
+```
+
+A2–A3 已完成 `Calibration Domain Models`、`Calibration Input Builder`、`Forward Outcome Builder`、`Calibration Row Finalizer`、`Monthly Cutoff Generator`、`Full Calibration Row Builder` 和 `Calibration Dataset Builder`。实际 dataset 执行关系是：
+
+```text
+Calibration Dataset Builder
+→ Monthly Cutoff Generator
+→ for each cutoff:
+    Full Calibration Row Builder
+    → Calibration Input Builder
+    → if start provenance exists:
+        Forward Outcome Builder(s)
+      else:
+        outcomes = ()
+    → Calibration Finalizer
+→ tuple[CalibrationRow, ...]
+```
+
+Calibration INPUT 严格只使用 historical cutoff 当时按 `observed_at <= cutoff` 可见的 System-Knowledge evidence；OUTCOME 可以使用 cutoff 之后、截至调用方显式给出的 `evaluation_cutoff` 可见的 evidence，但两者物理隔离，未来 evidence 不得反向进入 INPUT。revision baseline 只是 revision 能力启用时 current effective payload 的 replay seed，只能从自身 `observed_at` 起可见，不能 backdate 或倒装成更早的系统知识，因此严格 `system_observed` calibration 的现有历史长度天然有限，这不是数据错误。
+
+合法质量状态 `COMPLETE`、`INPUT_INCOMPLETE`、`OUTCOME_INCOMPLETE` 和 `INCOMPLETE` 均保留；Dataset Builder 不做 quality filtering。无 start provenance 属于 INPUT incomplete，不是 `ForwardOutcome.MISSING`；如果 INPUT 因 Sow 或 Trend 缺失而 incomplete，但 start provenance 存在，仍构建 future outcomes。`AVAILABLE + NOT_MATURED`、`AVAILABLE + MISSING` 等 mixed outcomes 都是合法记录。真正异常必须原样传播，不得静默跳过 horizon、month 或返回 partial dataset。
+
+Calibration Experiment v0.1 使用 UTC+08:00 自然日历月末 `23:59:59.999999` 作为机械 sampling cutoff。这是可调整的 research assumption，不是猪周期领域硬规则。`SowSourceType`、`horizon_weeks`、`evaluation_cutoff` 和 `max_offset_days` 均由调用方显式提供，当前没有默认或硬编码的 4/12/24 周 horizon。
+
+当前 Dataset 仅为 `tuple[CalibrationRow, ...]`，尚无 DataFrame、CSV、新数据库表或 dataset persistence。A4 Calibration Analysis 仍为 pending，尚未开始 Feature Extraction、calibration statistics、win rate、mean return、correlation、lead-lag calibration、threshold、Cycle Stage、Backtest 或股票/ETF outcome analysis，也尚未冻结 A4 的具体方法。
 
 ### V2 阶段关系与最终目标
 

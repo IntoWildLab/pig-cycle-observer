@@ -184,4 +184,20 @@
 
 **Why:** Knowledge-Time visibility 已由 Storage reader 完整负责，Business-Time mechanical features 已由 Trend pure functions 完整负责。薄接线可以复用两侧已验证契约，并避免让 Trend 理解 SQLite、`observed_at`、`revision_id`、`sets_current`、baseline 或 cutoff。System visibility 仍然只有 inclusive `observed_at <= cutoff`；wrapper 不增加 `publish_date <= cutoff`，也不把 cutoff 传给 Trend 的旧 publish-date `as_of`。
 
-**Status:** Complete in `4fe56f3`. Historical analysis/calibration preparation may follow, but the next concrete step is not yet frozen. Official-Availability Reader, Historical Calibration, Lead-Lag Analysis, Threshold Research, Backtest, Cycle Stage, Historical Snapshot and Investment Signal Fusion remain pending.
+**Status:** Complete in `4fe56f3`. Historical Calibration Preparation A2–A3 subsequently completed. Strict Official-Availability Reader, A4 Calibration Analysis, Lead-Lag Analysis, Threshold Research, Backtest, Cycle Stage, Historical Snapshot and Investment Signal Fusion remain pending.
+
+## 2026-08 — Calibration inputs and outcomes use physically separate time scopes
+
+**Decision:** Calibration INPUT 只使用 historical cutoff 时按 `observed_at <= cutoff` 可见的 System-Knowledge evidence；Calibration OUTCOME 可以使用 cutoff 之后、截至调用方显式 `evaluation_cutoff` 可见的 evidence。未来 outcome evidence 不得反向进入 INPUT。System-Knowledge 与 Strict Official-Availability 继续保持不同的 as-of 概念。
+
+**Why:** INPUT 回答“当时系统知道什么”，OUTCOME 回答“后来发生什么”。两者只有物理隔离，才能在 ex-post 评价 future outcome 的同时避免 look-ahead leakage。revision baseline 只是从自身 `observed_at` 起可见的 replay seed，不能倒装为 baseline 之前的系统知识；`publish_date` 单独也不能证明历史 exact payload 的官方可获得性。
+
+**Status:** Active and implemented for Historical Calibration Preparation A2–A3; Strict Official-Availability Reader remains pending
+
+## 2026-08 — Calibration preparation preserves incomplete samples and fails loud
+
+**Decision:** `COMPLETE`、`INPUT_INCOMPLETE`、`OUTCOME_INCOMPLETE` 和 `INCOMPLETE` 都是合法 calibration samples，Dataset Builder 不做 quality filtering。无 start provenance 是 INPUT incomplete，不是 outcome `MISSING`；真正异常原样传播，不得静默跳过 horizon、month 或返回 partial dataset。Calibration Experiment v0.1 的自然月末 sampling 是可调整 research assumption；`SowSourceType`、`horizon_weeks`、`evaluation_cutoff` 和 `max_offset_days` 保持显式，系统不提供默认 4/12/24 周 horizon。
+
+**Why:** 不完整性本身是历史证据质量的一部分，静默删除会造成 selection bias；把 Reader 或 builder 错误降级为缺失结果会掩盖数据完整性问题。显式实验参数和可替换 sampling assumption 可避免尚未校准的研究选择被误写成领域硬规则。
+
+**Status:** Active and implemented for Historical Calibration Preparation A2–A3; A4 Calibration Analysis remains pending and its methods are not frozen

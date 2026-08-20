@@ -261,18 +261,34 @@ Snapshot 的“所示记录方向”归纳整个当前展示窗口内全部相�
 
 不得使用后来发布或后来修订的数据美化历史判断。当前数据层已经保留 `publish_date`、`source_url` 和 processed source 等语义，未来历史分析应利用这些信息避免 look-ahead bias（前视偏差）。
 
-Trend v0 已支持按 `as_of` 对官方 `publish_date` 做最后一道过滤，从而阻止晚于判断时点发布的当前记录进入计算。但当前 storage 只保存当前有效业务版本，不能完整重建已被后续修订覆盖的旧版本。完整 point-in-time revision history 属于未来独立存储能力，不能把当前 `as_of` 过滤描述为完整历史复原。
+Trend v0 的旧 `as_of` 仍只对调用方传入的 current records 按 `publish_date` 过滤，不能单独恢复被覆盖的旧版本或证明 exact payload 的历史官方可获得性。现在另有独立 append-only revision history 与 System-Knowledge Reader，按 `observed_at <= cutoff` replay 当时系统实际知道的 effective state；两条路径不能混用，也不能把 Trend 的 publish-date filter 描述为 Strict Official-Availability 历史复原。
 
 ### Historical calibration 的 point-in-time 前置条件
 
-正式 historical calibration、lead-lag、阈值研究或 backtest 前，计划先保留现有 current effective tables，并增加独立 append-only revision history。历史读取必须明确选择两种不同问题之一：
+独立 append-only revision tables、可靠 `observed_at`、baseline provenance、conflict / order-unknown evidence、Future Business-Time Integrity 和 System-Knowledge Reader 均已实现。System-Knowledge visibility 固定为 inclusive `observed_at <= cutoff`，只从 revision tables replay 当时系统实际知道的 effective state；current tables 不得泄漏进 historical path。
 
-- **official-availability as-of**：按官方 `publish_date` 判断理论上已经公开的数据版本；
-- **system-knowledge as-of**：按系统首次成功观察版本的 `observed_at` 和历史保存判定，重建系统当时实际知道的 effective state。
+历史读取仍必须区分两种不同问题：
 
-业务所属日期、官方发布日期和系统观察时间不得互相替代。历史回填记录尤其不能因为官方发布日期较早，就假装系统当时已经掌握。未来链路应保持为 `revision storage → point-in-time reader → domain records → Trend pure functions`：Storage 负责版本选择和冲突处理，Trend 继续只负责机械特征。
+- **system-knowledge as-of**：按系统观察版本的 `observed_at` 和历史保存判定重建当时实际知道的 effective state；该 reader 已实现。
+- **strict official-availability as-of**：按可追溯的官方可获得性证据回答 exact payload 当时是否已经公开；该 reader 仍 pending。
 
-revision tables、point-in-time reader 和两种 as-of 目前均尚未实现。开始正式校准前还必须具备 append-only revision persistence、可靠 `observed_at`、baseline provenance、conflict / order-unknown 处理和防止 look-ahead 的回归测试。当前 `processed_sources` 会跳过已处理 URL，因此同 URL 原地修订仍是明确的检测边界，不能通过高频重复请求来掩盖。
+`publish_date` 是 Publish / Official Time 的重要字段，但单独不足以重建 Strict Official-Availability。官方 URL 可能原地修订，当前抓到的 payload 也可能不同于最初发布日期时的 payload；只使用 `publish_date <= cutoff` 会引入 revision bias 或 look-ahead bias。未来需要更强 evidence，例如官方 version timestamp、immutable URL、archived exact response 或 exact-payload first-seen evidence，但这些能力当前均未实现。
+
+三种时间必须分离：**Business Time** 是 `collection_date` 或 `month`；**Knowledge Time** 是 revision `observed_at`；**Publish / Official Time** 是官方 `publish_date` 及未来可能取得的更强版本证据。历史回填记录不能因为业务期间或发布日期较早，就假装系统当时已经知道该 exact payload。revision baseline 也只是 revision 能力引入时 current effective payload 的 replay seed，只能从自身 `observed_at` 起进入 System-Knowledge history，不能 backdate 或倒装到 baseline 之前。由此造成的严格 `system_observed` 历史长度限制是正确边界，不是待修复 bug。
+
+### Calibration Preparation v0.1
+
+当前 Calibration Preparation 已形成：`Revision → System-Knowledge Reader → Historical Trend → Calibration Input → Forward Outcome → Calibration Finalizer → Monthly Cutoff Generator → Full Calibration Row Builder → Calibration Dataset Builder`。
+
+Calibration INPUT 回答“historical cutoff 当时系统知道什么”，严格只使用该 cutoff 时 System-Knowledge 可见的 evidence。Calibration OUTCOME 回答“后来发生什么”，可以 ex-post 使用 cutoff 之后、截至调用方显式 `evaluation_cutoff` 可见的 evidence。INPUT 与 OUTCOME 物理隔离，OUTCOME evidence 绝不能反向进入 INPUT。
+
+`COMPLETE`、`INPUT_INCOMPLETE`、`OUTCOME_INCOMPLETE` 和 `INCOMPLETE` 都是合法 `CalibrationRow` quality。Dataset Builder 不做 quality filtering：missing input、missing outcome、not-matured outcome 和 no-start sample 均不得静默删除。无 start provenance 是 INPUT incomplete，不是 `ForwardOutcome.MISSING`；INPUT 即使因 Sow 或 Trend 缺失而 incomplete，只要 start provenance 存在，仍构建 future outcomes。`AVAILABLE + NOT_MATURED` 与 `AVAILABLE + MISSING` 都是合法 mixed outcomes。
+
+合法不完整状态必须保留，真正异常必须 fail loud。Reader、revision、builder 或 finalizer error 不得转换为 `MISSING`，不得跳过 horizon 或 month，不得返回 partial dataset。
+
+Calibration Experiment v0.1 采用 UTC+08:00 自然日历月末最后一微秒作为机械 sampling cutoff。这只是 adjustable research assumption，不是 pig-cycle domain hard rule。`SowSourceType`、`horizon_weeks`、`evaluation_cutoff` 和 `max_offset_days` 均由调用者显式提供；系统没有默认或硬编码 4/12/24 周 horizon。
+
+当前 Dataset 仅为 `tuple[CalibrationRow, ...]`，没有 DataFrame、CSV、新数据库表或 dataset persistence。当前只完成 Calibration Preparation；A4 Calibration Analysis 仍 pending，Feature Extraction、calibration statistics、win rate、mean return、correlation、lead-lag calibration、threshold、Cycle Stage、Backtest 和股票/ETF outcome analysis 均尚未开始，具体方法也未冻结。
 
 ## 10. 模型设计原则
 
